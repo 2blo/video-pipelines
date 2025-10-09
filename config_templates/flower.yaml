@@ -172,3 +172,62 @@ pipelines:
       - op: trim
         start: 0:22:20
         end: 0:22:26
+
+  rintaro_sad_smile:
+    metadata:
+      characters:
+        - rintaro
+    input: &flower_s1e7
+      show: the fragrant flower blooms with dignity
+      season: 1
+      episode: 7
+    steps:
+      - op: trim
+        start: 0:08:52
+        end: 0:08:58
+  hoshina_fearful:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e7
+    steps:
+      - op: trim
+        start: 0:11:37
+        end: 0:11:42
+  hoshina_and_saku_look_at_each_other:
+    metadata:
+      characters:
+        - hoshina
+        - saku
+    input: *flower_s1e7
+    steps:
+      - op: trim
+        start: 0:12:10
+        end: 0:12:18
+  saku_angry:
+    metadata:
+      characters:
+        - saku
+    input: *flower_s1e7
+    steps:
+      - op: trim
+        start: 0:12:34
+        end: 0:12:38
+  ayato_lock_in:
+    metadata:
+      characters:
+        - ayato
+    input: *flower_s1e7
+    steps:
+      - op: trim
+        start: 0:13:52
+        end: 0:13:57
+  saku_breathe:
+    metadata:
+      characters:
+        - saku
+    input: *flower_s1e7
+    steps:
+      - op: trim
+        start: 0:19:28
+        end: 0:19:37
