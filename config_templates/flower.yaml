@@ -231,3 +231,43 @@ pipelines:
       - op: trim
         start: 0:19:28
         end: 0:19:37
+
+  hoasina_clench_dress:
+    metadata:
+      characters:
+        - hoshina
+    input: &flower_s1e8
+      show: the fragrant flower blooms with dignity
+      season: 1
+      episode: 8
+    steps:
+      - op: trim
+        start: 0:04:22
+        end: 0:04:35
+  hoshina_raise_head:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e8
+    steps:
+      - op: trim
+        start: 0:04:43
+        end: 0:04:49
+  hoshina_sad_and_clasp:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e8
+    steps:
+      - op: trim
+        start: 0:05:10
+        end: 0:05:10
+  hoshina_eyes_closeup_and_hand_reach:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e8
+    steps:
+      - op: trim
+        start: 0:06:55
+        end: 0:07:15
