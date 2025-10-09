@@ -1,0 +1,174 @@
+shows:
+  the fragrant flower blooms with dignity:
+    path: TODO # TODO
+    episode_pattern: S{}/E{}.mp4
+pipelines:
+  todo:
+    metadata:
+      characters: [] # TODO
+    input: &flower_s1e6
+      show: the fragrant flower blooms with dignity
+      season: 1
+      episode: 6
+    steps: []
+  playground_hoshina_cry:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:04:20
+        end: 0:08:00
+
+  waguri_playground_pan:
+    metadata:
+      characters:
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:10:52
+        end: 0:10:57
+
+  playground_pan_hoshina_and_waguri:
+    metadata:
+      characters:
+        - hoshina
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:10:57
+        end: 0:11:14
+
+  waguri_eye_closeup:
+    metadata:
+      characters:
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:12:29
+        end: 0:12:34
+
+  hoshina_eye_tremble_and_bob_head:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:12:37
+        end: 0:12:42
+
+  waguri_scared_closeup:
+    metadata:
+      characters:
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:12:50
+        end: 0:12:54
+
+  hoshina_kneel:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:13:13
+        end: 0:13:18
+
+  hoshina_tear:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:13:25
+        end: 0:13:29
+
+  hoshina_turn_head_up:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:17:24
+        end: 0:17:27
+
+  hoshina_scared_closeup:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:18:15
+        end: 0:18:26
+
+  hoshina_and_waguri_sakura:
+    metadata:
+      characters:
+        - hoshina
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:19:00
+        end: 0:19:10
+
+  hoshina_eye_closeup:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:19:29
+        end: 0:19:36
+
+  hoshina_hair_sway:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:19:41
+        end: 0:19:50
+
+  waguri_happy_closeup:
+    metadata:
+      characters:
+        - waguri
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:20:05
+        end: 0:20:17
+
+  hoshina_lean_forward:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:21:53
+        end: 0:22:07
+
+  hoshina_smile_at_rintaro:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e6
+    steps:
+      - op: trim
+        start: 0:22:20
+        end: 0:22:26
