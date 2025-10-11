@@ -271,3 +271,43 @@ pipelines:
       - op: trim
         start: 0:06:55
         end: 0:07:15
+  rintaro_and_waguri_in_water:
+    metadata:
+      characters:
+        - rintaro
+        - waguri
+    input: &flower_s1e12
+      show: the fragrant flower blooms with dignity
+      season: 1
+      episode: 12
+    steps:
+      - op: trim
+        start: 0:06:12
+        end: 0:06:19
+  hoshina_hair_sway_beach:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e12
+    steps:
+      - op: trim
+        start: 0:06:20
+        end: 0:06:30
+  hoshina_silhouette_beach:
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e12
+    steps:
+      - op: trim
+        start: 0:06:32
+        end: 0:06:55
+  hoshina_many_other_beach: #TODO from previous clip onwards
+    metadata:
+      characters:
+        - hoshina
+    input: *flower_s1e12
+    steps:
+      - op: trim
+        start: 0:00:00
+        end: 0:00:00
