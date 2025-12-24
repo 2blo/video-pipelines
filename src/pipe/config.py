@@ -21,9 +21,14 @@ Input = Path | ManualDownload | Episode
 
 
 class Trim(BaseModel):
-    op: Literal["trim"]
+    type: Literal["trim"]
     start: timedelta
     end: timedelta
+
+
+class Upscale(BaseModel):
+    type: Literal["upscale"]
+    width: int
 
 
 class Pipeline(BaseModel):

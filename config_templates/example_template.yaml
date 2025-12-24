@@ -1,16 +1,14 @@
 windows_downloads_dir: {{windows_downloads_dir}}
 output_dir: data
+shows: {}
 pipelines:
-  first:
-    metadata: {}
-    input:
-      path: /mnt/c/Users/{{user}}/Downloads/20250627_094557.mp4
-    steps:
-      - op: trim
-        start: 0:00:04
-        end: 0:00:09
   second:
     metadata: {}
     input:
       link: {{pipelines.second.input.link}}
-    steps: []
+    steps:
+      - type: trim
+        start: 00:00:02
+        end: 00:00:04
+      - type: upscale
+        width: 192
