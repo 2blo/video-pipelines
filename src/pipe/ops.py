@@ -1,6 +1,7 @@
 import yaml
 import os
 from datetime import timedelta
+import glob
 import subprocess
 from pipe.chart import Chart
 from pipe.config import Config, Trim, ManualDownload, Path, Upscale
@@ -158,40 +159,69 @@ def execute_upscale(
 
 
 def process_pipelines(config: Config) -> None:
+    # artifact_root: where intermediate artifacts are written (renamed from old output_dir)
+    config.artifact_dir = config.artifact_dir
+
     for pipeline_name, pipeline in config.pipelines.items():
+        # Ensure artifact pipeline directory exists
+        pipeline_dir = os.path.join(config.artifact_dir, pipeline_name)
+        os.makedirs(pipeline_dir, exist_ok=True)
+
+        # Handle pipeline input (ManualDownload or Path)
         if isinstance(pipeline.input, ManualDownload):
-            previous_step = execute_manual_download(
-                step=pipeline.input,
-                windows_downloads_dir=config.windows_downloads_dir,
-                output_path_without_extension=os.path.join(
-                    config.output_dir, pipeline_name, pipeline.input.__class__.__name__
-                ),
+            output_path_without_extension = os.path.join(
+                config.artifact_dir, pipeline_name, pipeline.input.__class__.__name__
             )
+            # If not full refresh and a matching artifact already exists, reuse it
+            matches = glob.glob(f"{output_path_without_extension}*")
+            if matches and not config.full_refresh:
+                chosen = max(matches, key=os.path.getmtime)
+                previous_step = ExecutedStep(
+                    output_path=chosen, extension=os.path.splitext(chosen)[1]
+                )
+            else:
+                previous_step = execute_manual_download(
+                    step=pipeline.input,
+                    windows_downloads_dir=config.windows_downloads_dir,
+                    output_path_without_extension=output_path_without_extension,
+                )
         elif isinstance(pipeline.input, Path):
             previous_step = ExecutedStep(
                 output_path=pipeline.input.path,
                 extension=os.path.splitext(pipeline.input.path)[1],
             )
+
         for i, step in enumerate(pipeline.steps):
+            is_last = i == (len(pipeline.steps) - 1)
+            filename = f"{pipeline_name}_step_{i}_{step.__class__.__name__}{previous_step.extension}"
+
+            # Determine intended output path: final step goes to final_output_root as pipeline_name + extension
+            if is_last:
+                os.makedirs(config.output_dir, exist_ok=True)
+                intended_output = os.path.join(
+                    config.output_dir, f"{pipeline_name}{previous_step.extension}"
+                )
+            else:
+                intended_output = os.path.join(pipeline_dir, filename)
+
+            # Skip executing this step if intended output already exists and we're not doing a full refresh
+            if not config.full_refresh and os.path.exists(intended_output):
+                previous_step = ExecutedStep(
+                    output_path=intended_output, extension=previous_step.extension
+                )
+                continue
+
             if isinstance(step, Trim):
                 previous_step = execute_trim(
                     step=step,
                     previous_step=previous_step,
-                    output_path=os.path.join(
-                        config.output_dir,
-                        pipeline_name,
-                        f"step_{i}_{step.__class__.__name__}{previous_step.extension}",
-                    ),
+                    output_path=intended_output,
                 )
             elif isinstance(step, Upscale):
                 previous_step = execute_upscale(
                     step=step,
                     previous_step=previous_step,
-                    output_path=os.path.join(
-                        config.output_dir,
-                        pipeline_name,
-                        f"step_{i}_{step.__class__.__name__}{previous_step.extension}",
-                    ),
+                    output_path=intended_output,
                 )
 
 
@@ -204,6 +234,7 @@ def load_config() -> Config:
             yaml.safe_load(jinja2.Template(f.read()).render(**chart.values))
         )
     return config
+
 
 def main() -> None:
     config = load_config()

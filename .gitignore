@@ -7,3 +7,5 @@ __pycache__
 sandbox
 data
 *.egg-info
+dependencies
+models

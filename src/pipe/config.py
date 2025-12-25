@@ -34,7 +34,7 @@ class Upscale(BaseModel):
 class Pipeline(BaseModel):
     metadata: Dict[str, Any]
     input: Input
-    steps: List[Trim]
+    steps: List[Trim | Upscale]
 
 
 class Show(BaseModel):
@@ -43,7 +43,9 @@ class Show(BaseModel):
 
 
 class Config(BaseModel):
+    full_refresh: bool = False
     shows: Dict[str, Show]
     windows_downloads_dir: str
+    artifact_dir: str
     output_dir: str
     pipelines: Dict[str, Pipeline]

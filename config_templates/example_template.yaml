@@ -1,5 +1,6 @@
 windows_downloads_dir: {{windows_downloads_dir}}
-output_dir: data
+artifact_dir: data
+output_dir: /mnt/e/_/active/projects/little-busters/media
 shows: {}
 pipelines:
   second:
