@@ -21,15 +21,20 @@ Input = Path | ManualDownload | Episode
 
 
 class Trim(BaseModel):
-    op: Literal["trim"]
+    type: Literal["trim"]
     start: timedelta
     end: timedelta
+
+
+class Upscale(BaseModel):
+    type: Literal["upscale"]
+    width: int
 
 
 class Pipeline(BaseModel):
     metadata: Dict[str, Any]
     input: Input
-    steps: List[Trim]
+    steps: List[Trim | Upscale]
 
 
 class Show(BaseModel):
@@ -38,7 +43,9 @@ class Show(BaseModel):
 
 
 class Config(BaseModel):
+    full_refresh: bool = False
     shows: Dict[str, Show]
     windows_downloads_dir: str
+    artifact_dir: str
     output_dir: str
     pipelines: Dict[str, Pipeline]
