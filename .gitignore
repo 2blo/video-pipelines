@@ -9,3 +9,5 @@ data
 *.egg-info
 dependencies
 models
+.seedvr2-ckpts
+tools

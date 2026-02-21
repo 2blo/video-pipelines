@@ -1,0 +1,5 @@
+FROM ghcr.io/k4yt3x/video2x:6.4.0
+
+WORKDIR /host
+
+ENTRYPOINT ["video2x"]
