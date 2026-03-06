@@ -1,6 +1,5 @@
 # Video pipelines
 
-
 ## RIFE Docker video interpolation
 
 Build + run with your own input/output paths (WSL paths, for example `/mnt/c/...`, work):
