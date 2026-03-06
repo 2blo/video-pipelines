@@ -1,0 +1,20 @@
+windows_downloads_dir: "{{windows_downloads_dir}}"
+database_file_path: "{{database_file_path}}"
+artifact_dir: data
+output_dir: "{{output_dir}}"
+shows: {}
+job:
+  name: frieren_s2e07_copy_tracks_job
+  pipelines:
+    - name: frieren_s2e07_copy_tracks
+      metadata:
+        source: erai-raws
+        show: Sousou no Frieren
+        season: "2"
+        episode: "7"
+        stage: copy_tracks_only
+      input:
+        path: "{{interpolated_input_path}}"
+      steps:
+        - type: copy_tracks
+          source_path: "{{source_input_path}}"

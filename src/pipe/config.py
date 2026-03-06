@@ -1,6 +1,6 @@
-from pydantic import BaseModel
 from datetime import timedelta
-from typing import List, Literal, Dict, Any
+from pydantic import BaseModel
+from typing import List, Literal, Dict
 
 
 class ManualDownload(BaseModel):
@@ -26,15 +26,26 @@ class Trim(BaseModel):
     end: timedelta
 
 
-class Upscale(BaseModel):
-    type: Literal["upscale"]
-    width: int
+class Interpolate(BaseModel):
+    type: Literal["interpolate"]
+    fps: int
+
+
+class CopyTracks(BaseModel):
+    type: Literal["copy_tracks"]
+    source_path: str
 
 
 class Pipeline(BaseModel):
-    metadata: Dict[str, Any]
+    name: str
+    metadata: Dict[str, str]
     input: Input
-    steps: List[Trim | Upscale]
+    steps: List[Trim | Interpolate | CopyTracks]
+
+
+class Job(BaseModel):
+    name: str
+    pipelines: List[Pipeline]
 
 
 class Show(BaseModel):
@@ -46,6 +57,7 @@ class Config(BaseModel):
     full_refresh: bool = False
     shows: Dict[str, Show]
     windows_downloads_dir: str
+    database_file_path: str
     artifact_dir: str
     output_dir: str
-    pipelines: Dict[str, Pipeline]
+    job: Job

@@ -1,15 +1,18 @@
 windows_downloads_dir: {{windows_downloads_dir}}
+database_file_path: "{{database_file_path}}"
 artifact_dir: data
 output_dir: /mnt/e/_/active/projects/little-busters/media
 shows: {}
-pipelines:
-  second:
-    metadata: {}
-    input:
-      link: {{pipelines.second.input.link}}
-    steps:
-      - type: trim
-        start: 00:00:02
-        end: 00:00:04
-      - type: upscale
-        width: 192
+job:
+  name: third_job
+  pipelines:
+    - name: third
+      metadata: {}
+      input:
+        link: {{pipelines.second.input.link}}
+      steps:
+        - type: trim
+          start: 00:00:02
+          end: 00:00:04
+        - type: interpolate
+          fps: 240
