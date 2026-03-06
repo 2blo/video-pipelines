@@ -576,6 +576,10 @@ def interpolate(input_path: str, output_path: str, fps: int) -> None:
 
     rife_image = os.environ.get("RIFE_IMAGE", "video-pipelines-rife:latest")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("RIFE_MODEL_CACHE_DIR", ".cache/rife-model")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
 
     command: List[str] = [
         "docker",
@@ -586,6 +590,8 @@ def interpolate(input_path: str, output_path: str, fps: int) -> None:
         f"{input_dir}:/io/in:ro",
         "-v",
         f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/rife/train_log",
         rife_image,
         f"/io/in/{os.path.basename(input_abs)}",
         str(scale),

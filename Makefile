@@ -1,5 +1,6 @@
 RIFE_IMAGE ?= video-pipelines-rife:latest
 DOCKER_GPU_ARGS ?= --gpus all
+RIFE_MODEL_CACHE_DIR ?= .cache/rife-model
 ARTIFACT_DIR ?= data
 PIPELINE_DB_PATH ?= .video_pipelines.duckdb
 
@@ -8,19 +9,25 @@ PIPELINE_DB_PATH ?= .video_pipelines.duckdb
 rife-image:
 	docker build -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
 
-rife-upscale: rife-image
+rife-upscale:
 	@if [ -z "$(INPUT)" ] || [ -z "$(SCALE)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make rife-upscale INPUT=/path/in.mp4 SCALE=2 OUTPUT=/path/out.mp4"; \
 		exit 1; \
+	fi
+	@if ! docker image inspect "$(RIFE_IMAGE)" >/dev/null 2>&1; then \
+		$(MAKE) rife-image; \
 	fi
 	@in_abs="$$(realpath -m "$(INPUT)")"; \
 	out_abs="$$(realpath -m "$(OUTPUT)")"; \
 	in_dir="$$(dirname "$$in_abs")"; \
 	out_dir="$$(dirname "$$out_abs")"; \
+	cache_dir="$$(realpath -m "$(RIFE_MODEL_CACHE_DIR)")"; \
+	mkdir -p "$$cache_dir"; \
 	mkdir -p "$$out_dir"; \
 	docker run --rm $(DOCKER_GPU_ARGS) \
 		-v "$$in_dir:/io/in:ro" \
 		-v "$$out_dir:/io/out" \
+		-v "$$cache_dir:/opt/rife/train_log" \
 		$(RIFE_IMAGE) \
 		"/io/in/$$(basename "$$in_abs")" \
 		"$(SCALE)" \

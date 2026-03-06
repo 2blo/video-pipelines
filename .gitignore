@@ -10,5 +10,6 @@ data
 models
 .video_pipelines.duckdb
 .video_pipelines.duckdb.wal
+.cache
 .seedvr2-ckpts
 tools
