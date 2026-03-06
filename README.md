@@ -1,8 +1,5 @@
 # Video pipelines
 
-```bash
-make build
-```
 
 ## RIFE Docker video interpolation
 
