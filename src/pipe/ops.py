@@ -24,6 +24,7 @@ from pipe.config import (
     ManualDownload,
     Path,
     Trim,
+    Upscale,
 )
 from pydantic import BaseModel
 
@@ -548,6 +549,52 @@ def get_video_fps(input_path: str) -> float:
         ) from exc
 
 
+def get_video_width(input_path: str) -> int:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        input_path,
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        details: List[str] = [
+            "Failed to read input video width with ffprobe.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    output = result.stdout.strip()
+    if not output:
+        raise RuntimeError("ffprobe returned empty output for input video width.")
+
+    try:
+        width = int(output.splitlines()[0].strip())
+        if width <= 0:
+            raise RuntimeError(
+                f"Non-positive input width parsed from ffprobe output: {width}"
+            )
+        return width
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Could not parse input video width from ffprobe output: {output}"
+        ) from exc
+
+
 def interpolate(input_path: str, output_path: str, fps: int) -> None:
     if fps <= 0:
         raise ValueError(
@@ -621,6 +668,71 @@ def execute_interpolate(
         input_path=previous_step.output_path,
         output_path=output_path,
         fps=step.fps,
+    )
+    return ExecutedStep(output_path=output_path, extension=previous_step.extension)
+
+
+def upscale(input_path: str, output_path: str, width: int) -> None:
+    if width <= 0:
+        raise ValueError(
+            f"Invalid upscale width={width}. Width must be a positive integer."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    output_abs = os.path.abspath(output_path)
+    input_dir = os.path.dirname(input_abs)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    input_width = get_video_width(input_abs)
+    if width <= input_width:
+        raise ValueError(
+            f"Requested width={width} is not larger than input width={input_width}."
+        )
+
+    esrgan_image = os.environ.get("ESRGAN_IMAGE", "video-pipelines-esrgan:latest")
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("ESRGAN_MODEL_CACHE_DIR", ".cache/esrgan-model")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{input_dir}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/esrgan/models",
+        esrgan_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        str(width),
+        f"/io/out/{os.path.basename(output_abs)}",
+    ]
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "ESRGAN docker upscale failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+            f"Input width: {input_width}",
+            f"Requested width: {width}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+
+def execute_upscale(
+    step: Upscale, previous_step: ExecutedStep, output_path: str
+) -> ExecutedStep:
+    upscale(
+        input_path=previous_step.output_path,
+        output_path=output_path,
+        width=step.width,
     )
     return ExecutedStep(output_path=output_path, extension=previous_step.extension)
 
@@ -726,9 +838,10 @@ def process_pipelines(loaded_config: LoadedConfig) -> None:
     n_pipelines = len(config.job.pipelines)
 
     try:
-        for pipeline_index, pipeline in enumerate(config.job.pipelines):
+        for pipeline_index, (pipeline_name, pipeline) in enumerate(
+            config.job.pipelines.items()
+        ):
             pipeline_start_timestamp = utc_now()
-            pipeline_name = pipeline.name
             pipeline_dir = get_pipeline_artifact_dir(config, pipeline_name)
             os.makedirs(pipeline_dir, exist_ok=True)
 
@@ -852,6 +965,12 @@ def process_pipelines(loaded_config: LoadedConfig) -> None:
                         )
                     elif isinstance(step, Interpolate):
                         previous_step = execute_interpolate(
+                            step=step,
+                            previous_step=previous_step,
+                            output_path=intended_output,
+                        )
+                    elif isinstance(step, Upscale):
+                        previous_step = execute_upscale(
                             step=step,
                             previous_step=previous_step,
                             output_path=intended_output,
