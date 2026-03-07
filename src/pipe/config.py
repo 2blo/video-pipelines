@@ -31,21 +31,25 @@ class Interpolate(BaseModel):
     fps: int
 
 
+class Upscale(BaseModel):
+    type: Literal["upscale"]
+    width: int
+
+
 class CopyTracks(BaseModel):
     type: Literal["copy_tracks"]
     source_path: str
 
 
 class Pipeline(BaseModel):
-    name: str
     metadata: Dict[str, str]
     input: Input
-    steps: List[Trim | Interpolate | CopyTracks]
+    steps: List[Trim | Interpolate | Upscale | CopyTracks]
 
 
 class Job(BaseModel):
     name: str
-    pipelines: List[Pipeline]
+    pipelines: Dict[str, Pipeline]
 
 
 class Show(BaseModel):

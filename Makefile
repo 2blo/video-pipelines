@@ -1,10 +1,12 @@
 RIFE_IMAGE ?= video-pipelines-rife:latest
+ESRGAN_IMAGE ?= video-pipelines-esrgan:latest
 DOCKER_GPU_ARGS ?= --gpus all
 RIFE_MODEL_CACHE_DIR ?= .cache/rife-model
+ESRGAN_MODEL_CACHE_DIR ?= .cache/esrgan-model
 ARTIFACT_DIR ?= data
 PIPELINE_DB_PATH ?= .video_pipelines.duckdb
 
-.PHONY: rife-image rife-upscale rife-example clean-all
+.PHONY: rife-image rife-upscale rife-example esrgan-image esrgan-upscale clean-all
 
 rife-image:
 	docker build -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
@@ -43,6 +45,33 @@ rife-example: rife-image
 		INPUT="$(CURDIR)/sandbox/inputs/example.mp4" \
 		SCALE=2 \
 		OUTPUT="$(CURDIR)/sandbox/outputs/example_2x.mp4"
+
+esrgan-image:
+	docker build -t $(ESRGAN_IMAGE) -f docker/esrgan/Dockerfile .
+
+esrgan-upscale:
+	@if [ -z "$(INPUT)" ] || [ -z "$(WIDTH)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "Usage: make esrgan-upscale INPUT=/path/in.mp4 WIDTH=2160 OUTPUT=/path/out.mkv"; \
+		exit 1; \
+	fi
+	@if ! docker image inspect "$(ESRGAN_IMAGE)" >/dev/null 2>&1; then \
+		$(MAKE) esrgan-image; \
+	fi
+	@in_abs="$$(realpath -m "$(INPUT)")"; \
+	out_abs="$$(realpath -m "$(OUTPUT)")"; \
+	in_dir="$$(dirname "$$in_abs")"; \
+	out_dir="$$(dirname "$$out_abs")"; \
+	cache_dir="$$(realpath -m "$(ESRGAN_MODEL_CACHE_DIR)")"; \
+	mkdir -p "$$cache_dir"; \
+	mkdir -p "$$out_dir"; \
+	docker run --rm $(DOCKER_GPU_ARGS) \
+		-v "$$in_dir:/io/in:ro" \
+		-v "$$out_dir:/io/out" \
+		-v "$$cache_dir:/opt/esrgan/models" \
+		$(ESRGAN_IMAGE) \
+		"/io/in/$$(basename "$$in_abs")" \
+		"$(WIDTH)" \
+		"/io/out/$$(basename "$$out_abs")"
 
 clean-all:
 	rm -rf "$(ARTIFACT_DIR)"
