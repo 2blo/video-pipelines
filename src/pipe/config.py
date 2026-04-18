@@ -1,6 +1,7 @@
 from datetime import timedelta
-from pydantic import BaseModel
-from typing import List, Literal, Dict
+from typing import Annotated, Any, Dict, List, Literal
+
+from pydantic import BaseModel, Field
 
 
 class ManualDownload(BaseModel):
@@ -26,6 +27,12 @@ class Trim(BaseModel):
     end: timedelta
 
 
+class Encode(BaseModel):
+    type: Literal["encode"]
+    codec: Literal["prores"]
+    profile: Literal["proxy", "lt", "422", "hq", "4444", "4444xq"] = "422"
+
+
 class Interpolate(BaseModel):
     type: Literal["interpolate"]
     fps: int
@@ -41,10 +48,21 @@ class CopyTracks(BaseModel):
     source_path: str
 
 
+FfmpegOperation = Annotated[Trim | CopyTracks | Encode, Field(discriminator="type")]
+
+
+class Ffmpeg(BaseModel):
+    type: Literal["ffmpeg"]
+    operations: List[FfmpegOperation]
+
+
+Step = Annotated[Ffmpeg | Interpolate | Upscale, Field(discriminator="type")]
+
+
 class Pipeline(BaseModel):
-    metadata: Dict[str, str]
+    metadata: Dict[str, Any]
     input: Input
-    steps: List[Trim | Interpolate | Upscale | CopyTracks]
+    steps: List[Step]
 
 
 class Job(BaseModel):

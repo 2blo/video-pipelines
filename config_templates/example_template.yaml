@@ -11,9 +11,11 @@ job:
       input:
         link: {{pipelines["4k_240fps"].input.link}}
       steps:
-        - type: trim
-          start: 00:00:02
-          end: 00:00:04
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:02
+              end: 00:00:04
         - type: upscale
           width: 2160
         - type: interpolate

@@ -17,7 +17,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:04:20
         end: 0:08:00
 
@@ -27,7 +27,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:10:52
         end: 0:10:57
 
@@ -38,7 +38,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:10:57
         end: 0:11:14
 
@@ -48,7 +48,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:12:29
         end: 0:12:34
 
@@ -58,7 +58,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:12:37
         end: 0:12:42
 
@@ -68,7 +68,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:12:50
         end: 0:12:54
 
@@ -78,7 +78,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:13:13
         end: 0:13:18
 
@@ -88,7 +88,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:13:25
         end: 0:13:29
 
@@ -98,7 +98,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:17:24
         end: 0:17:27
 
@@ -108,7 +108,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:18:15
         end: 0:18:26
 
@@ -119,7 +119,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:19:00
         end: 0:19:10
 
@@ -129,7 +129,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:19:29
         end: 0:19:36
 
@@ -139,7 +139,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:19:41
         end: 0:19:50
 
@@ -149,7 +149,7 @@ pipelines:
         - waguri
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:20:05
         end: 0:20:17
 
@@ -159,7 +159,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:21:53
         end: 0:22:07
 
@@ -169,7 +169,7 @@ pipelines:
         - hoshina
     input: *flower_s1e6
     steps:
-      - op: trim
+      - type: trim
         start: 0:22:20
         end: 0:22:26
 
@@ -182,7 +182,7 @@ pipelines:
       season: 1
       episode: 7
     steps:
-      - op: trim
+      - type: trim
         start: 0:08:52
         end: 0:08:58
   hoshina_fearful:
@@ -191,7 +191,7 @@ pipelines:
         - hoshina
     input: *flower_s1e7
     steps:
-      - op: trim
+      - type: trim
         start: 0:11:37
         end: 0:11:42
   hoshina_and_saku_look_at_each_other:
@@ -201,7 +201,7 @@ pipelines:
         - saku
     input: *flower_s1e7
     steps:
-      - op: trim
+      - type: trim
         start: 0:12:10
         end: 0:12:18
   saku_angry:
@@ -210,7 +210,7 @@ pipelines:
         - saku
     input: *flower_s1e7
     steps:
-      - op: trim
+      - type: trim
         start: 0:12:34
         end: 0:12:38
   ayato_lock_in:
@@ -219,7 +219,7 @@ pipelines:
         - ayato
     input: *flower_s1e7
     steps:
-      - op: trim
+      - type: trim
         start: 0:13:52
         end: 0:13:57
   saku_breathe:
@@ -228,7 +228,7 @@ pipelines:
         - saku
     input: *flower_s1e7
     steps:
-      - op: trim
+      - type: trim
         start: 0:19:28
         end: 0:19:37
 
@@ -241,7 +241,7 @@ pipelines:
       season: 1
       episode: 8
     steps:
-      - op: trim
+      - type: trim
         start: 0:04:22
         end: 0:04:35
   hoshina_raise_head:
@@ -250,7 +250,7 @@ pipelines:
         - hoshina
     input: *flower_s1e8
     steps:
-      - op: trim
+      - type: trim
         start: 0:04:43
         end: 0:04:49
   hoshina_sad_and_clasp:
@@ -259,7 +259,7 @@ pipelines:
         - hoshina
     input: *flower_s1e8
     steps:
-      - op: trim
+      - type: trim
         start: 0:05:10
         end: 0:05:10
   hoshina_eyes_closeup_and_hand_reach:
@@ -268,7 +268,7 @@ pipelines:
         - hoshina
     input: *flower_s1e8
     steps:
-      - op: trim
+      - type: trim
         start: 0:06:55
         end: 0:07:15
   rintaro_and_waguri_in_water:
@@ -281,7 +281,7 @@ pipelines:
       season: 1
       episode: 12
     steps:
-      - op: trim
+      - type: trim
         start: 0:06:12
         end: 0:06:19
   hoshina_hair_sway_beach:
@@ -290,7 +290,7 @@ pipelines:
         - hoshina
     input: *flower_s1e12
     steps:
-      - op: trim
+      - type: trim
         start: 0:06:20
         end: 0:06:30
   hoshina_silhouette_beach:
@@ -299,7 +299,7 @@ pipelines:
         - hoshina
     input: *flower_s1e12
     steps:
-      - op: trim
+      - type: trim
         start: 0:06:32
         end: 0:06:55
   hoshina_many_other_beach: #TODO from previous clip onwards
@@ -308,6 +308,6 @@ pipelines:
         - hoshina
     input: *flower_s1e12
     steps:
-      - op: trim
+      - type: trim
         start: 0:00:00
         end: 0:00:00

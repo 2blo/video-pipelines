@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("PIPELINE_METRICS_TABLE", "step_events_v3"),
         help="Table name to read from.",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=int(os.environ.get("PIPELINE_METRICS_LIMIT", "100")),
+        help="Maximum number of rows to display.",
+    )
     args, _unknown = parser.parse_known_args()
     return args
 
@@ -47,18 +53,27 @@ def should_hide_column(column_name: str) -> bool:
     return any(token in lowered for token in hidden_tokens)
 
 
-def query_tables(db_path: str | None = None, table: str | None = None) -> None:
+def query_tables(
+    db_path: str | None = None, table: str | None = None, limit: int | None = None
+) -> None:
     import duckdb
 
-    if db_path is None or table is None:
+    if db_path is None or table is None or limit is None:
         args = parse_args()
-        db_path = args.db_path
-        table = args.table
+        if db_path is None:
+            db_path = args.db_path
+        if table is None:
+            table = args.table
+        if limit is None:
+            limit = args.limit
 
     assert db_path is not None
     assert table is not None
+    assert limit is not None
 
     table = validate_identifier(table)
+    if limit < 1:
+        raise ValueError(f"Limit must be >= 1, got: {limit}")
 
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database file not found: {db_path}")
@@ -101,7 +116,7 @@ def query_tables(db_path: str | None = None, table: str | None = None) -> None:
                     )
                 )
             except Exception:
-                relation.show(max_rows=100000, max_width=0, max_col_width=0)
+                relation.show(max_rows=limit, max_width=0, max_col_width=0)
 
         try:
             from IPython.display import Markdown, display
@@ -142,15 +157,16 @@ def query_tables(db_path: str | None = None, table: str | None = None) -> None:
                 step.error_message AS step_error_message,
                 file.path AS file_path,
                 file.extension AS file_extension,
-                file.size_bytes AS file_size_bytes,
+                cast(file.size_bytes / 1024 / 1024 AS bigint) AS file_size_mb,
                 file.width AS file_width,
                 file.height AS file_height,
                 file.fps AS file_fps,
-                file.duration_ms AS file_duration_ms,
+                cast(file.duration_ms / 100 AS bigint) / 10.0  AS file_duration_s,
                 file.frame_count AS file_frame_count,
                 file.sha256 AS file_sha256
             FROM {table}
             ORDER BY event_timestamp desc
+            LIMIT {limit}
             """
         )
     finally:
@@ -158,7 +174,7 @@ def query_tables(db_path: str | None = None, table: str | None = None) -> None:
 
 
 def main() -> None:
-    query_tables()
+    query_tables(limit=10)
 
 
 if __name__ == "__main__":
