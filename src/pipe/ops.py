@@ -1,28 +1,18 @@
-import glob
-import hashlib
-import json
 import math
 import os
 import shlex
 import shutil
 import subprocess
-from datetime import datetime, timedelta, timezone
-from time import sleep
-from typing import Dict, List, Literal, Optional
-
-import duckdb
-import ffmpeg
-import jinja2
 import webbrowser
-import yaml
-from pipe.chart import Chart
+from time import sleep
+from typing import Dict, List
+
 from pipe.config import (
-    Config,
     CopyTracks,
-    Episode,
+    Encode,
+    Ffmpeg,
     Interpolate,
     ManualDownload,
-    Path,
     Trim,
     Upscale,
 )
@@ -32,354 +22,6 @@ from pydantic import BaseModel
 class ExecutedStep(BaseModel):
     output_path: str
     extension: str
-
-
-class LoadedConfig(BaseModel):
-    config: Config
-    chart_path: str
-    chart_json: str
-    rendered_config_json: str
-
-
-StepEventType = Literal["start", "completed", "skipped", "failed"]
-STEP_EVENTS_TABLE = "step_events_v3"
-
-
-class MediaFileInfo(BaseModel):
-    path: str
-    extension: str
-    size_bytes: Optional[int]
-    width: Optional[int]
-    height: Optional[int]
-    fps: Optional[float]
-    duration_ms: Optional[int]
-    frame_count: Optional[int]
-    sha256: Optional[str]
-    metadata_text: Optional[str]
-
-
-def _safe_int(value: object) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(float(str(value)))
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_fraction_to_float(value: Optional[str]) -> Optional[float]:
-    if not value or value in ["0/0", "N/A"]:
-        return None
-    if "/" in value:
-        numerator, denominator = value.split("/", 1)
-        try:
-            num = float(numerator)
-            den = float(denominator)
-            if den == 0:
-                return None
-            return num / den
-        except ValueError:
-            return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-def probe_media_file_info(file_path: str, include_hash: bool = False) -> MediaFileInfo:
-    file_abs = os.path.abspath(file_path)
-    extension = os.path.splitext(file_abs)[1]
-
-    if not os.path.exists(file_abs):
-        return MediaFileInfo(
-            path=file_abs,
-            extension=extension,
-            size_bytes=None,
-            width=None,
-            height=None,
-            fps=None,
-            duration_ms=None,
-            frame_count=None,
-            sha256=None,
-            metadata_text=None,
-        )
-
-    size_bytes = os.path.getsize(file_abs)
-    try:
-        probe = ffmpeg.probe(file_abs)
-        metadata_text = json.dumps(probe, sort_keys=True)
-    except ffmpeg.Error as exc:
-        stderr_text = ""
-        if exc.stderr:
-            try:
-                stderr_text = exc.stderr.decode("utf-8", errors="replace")
-            except Exception:
-                stderr_text = str(exc.stderr)
-        sha256 = hash_file_sha256(file_abs) if include_hash else None
-        return MediaFileInfo(
-            path=file_abs,
-            extension=extension,
-            size_bytes=size_bytes,
-            width=None,
-            height=None,
-            fps=None,
-            duration_ms=None,
-            frame_count=None,
-            sha256=sha256,
-            metadata_text=stderr_text or str(exc),
-        )
-
-    format_info = probe.get("format", {})
-    streams = probe.get("streams", [])
-    video_stream = next(
-        (stream for stream in streams if stream.get("codec_type") == "video"),
-        None,
-    )
-
-    width = _safe_int(video_stream.get("width") if video_stream else None)
-    height = _safe_int(video_stream.get("height") if video_stream else None)
-
-    fps = None
-    if video_stream:
-        fps = _parse_fraction_to_float(video_stream.get("avg_frame_rate"))
-        if fps is None:
-            fps = _parse_fraction_to_float(video_stream.get("r_frame_rate"))
-
-    duration_seconds: Optional[float] = None
-    try:
-        if "duration" in format_info:
-            duration_seconds = float(format_info["duration"])
-    except (TypeError, ValueError):
-        duration_seconds = None
-
-    if duration_seconds is None and video_stream:
-        try:
-            if "duration" in video_stream:
-                duration_seconds = float(video_stream["duration"])
-        except (TypeError, ValueError):
-            duration_seconds = None
-
-    duration_ms = int(duration_seconds * 1000) if duration_seconds is not None else None
-
-    frame_count = _safe_int(video_stream.get("nb_frames") if video_stream else None)
-    if frame_count is None and fps is not None and duration_seconds is not None:
-        frame_count = int(round(fps * duration_seconds))
-
-    sha256 = hash_file_sha256(file_abs) if include_hash else None
-    return MediaFileInfo(
-        path=file_abs,
-        extension=extension,
-        size_bytes=size_bytes,
-        width=width,
-        height=height,
-        fps=fps,
-        duration_ms=duration_ms,
-        frame_count=frame_count,
-        sha256=sha256,
-        metadata_text=metadata_text,
-    )
-
-
-class StepEventLogger:
-    def __init__(self, db_path: str):
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
-        self._conn = duckdb.connect(db_path)
-        self._ensure_schema()
-
-    def _ensure_schema(self) -> None:
-        self._conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {STEP_EVENTS_TABLE} (
-                event_timestamp TIMESTAMP,
-                job STRUCT(
-                    name VARCHAR,
-                    chart_path VARCHAR,
-                    chart_json VARCHAR,
-                    rendered_config_json VARCHAR,
-                    pipeline_index INTEGER,
-                    n_pipelines INTEGER,
-                    start_timestamp TIMESTAMP,
-                    end_timestamp TIMESTAMP
-                ),
-                pipeline STRUCT(
-                    name VARCHAR,
-                    metadata_json VARCHAR,
-                    input_json VARCHAR,
-                    total_n_steps INTEGER,
-                    start_timestamp TIMESTAMP,
-                    end_timestamp TIMESTAMP
-                ),
-                step STRUCT(
-                    index INTEGER,
-                    type VARCHAR,
-                    event VARCHAR,
-                    step_json VARCHAR,
-                    error_message VARCHAR
-                ),
-                file STRUCT(
-                    path VARCHAR,
-                    extension VARCHAR,
-                    size_bytes BIGINT,
-                    width INTEGER,
-                    height INTEGER,
-                    fps DOUBLE,
-                    duration_ms BIGINT,
-                    frame_count BIGINT,
-                    sha256 VARCHAR
-                ),
-                raw_media_metadata TEXT
-            )
-            """
-        )
-
-    def log_step_event(
-        self,
-        *,
-        event_timestamp: datetime,
-        chart_path: str,
-        chart_json: str,
-        rendered_config_json: str,
-        job_name: str,
-        pipeline_index: int,
-        n_pipelines: int,
-        job_end_timestamp: Optional[datetime],
-        pipeline_name: str,
-        pipeline_metadata_json: str,
-        pipeline_input_json: str,
-        total_n_steps: int,
-        pipeline_start_timestamp: datetime,
-        pipeline_end_timestamp: Optional[datetime],
-        step_index: int,
-        step_type: str,
-        step_json: str,
-        step_event: StepEventType,
-        job_start_timestamp: datetime,
-        file_info: MediaFileInfo,
-        error_message: Optional[str],
-    ) -> None:
-        self._conn.execute(
-            f"""
-            INSERT INTO {STEP_EVENTS_TABLE} (
-                event_timestamp,
-                job,
-                pipeline,
-                step,
-                file,
-                raw_media_metadata
-            )
-            SELECT
-                ?,
-                struct_pack(
-                    name := ?,
-                    chart_path := ?,
-                    chart_json := ?,
-                    rendered_config_json := ?,
-                    pipeline_index := ?,
-                    n_pipelines := ?,
-                    start_timestamp := ?,
-                    end_timestamp := ?
-                ),
-                struct_pack(
-                    name := ?,
-                    metadata_json := ?,
-                    input_json := ?,
-                    total_n_steps := ?,
-                    start_timestamp := ?,
-                    end_timestamp := ?
-                ),
-                struct_pack(
-                    index := ?,
-                    type := ?,
-                    event := ?,
-                    step_json := ?,
-                    error_message := ?
-                ),
-                struct_pack(
-                    path := ?,
-                    extension := ?,
-                    size_bytes := ?,
-                    width := ?,
-                    height := ?,
-                    fps := ?,
-                    duration_ms := ?,
-                    frame_count := ?,
-                    sha256 := ?
-                ),
-                ?
-            """,
-            [
-                event_timestamp,
-                job_name,
-                chart_path,
-                chart_json,
-                rendered_config_json,
-                pipeline_index,
-                n_pipelines,
-                job_start_timestamp,
-                job_end_timestamp,
-                pipeline_name,
-                pipeline_metadata_json,
-                pipeline_input_json,
-                total_n_steps,
-                pipeline_start_timestamp,
-                pipeline_end_timestamp,
-                step_index,
-                step_type,
-                step_event,
-                step_json,
-                error_message,
-                file_info.path,
-                file_info.extension,
-                file_info.size_bytes,
-                file_info.width,
-                file_info.height,
-                file_info.fps,
-                file_info.duration_ms,
-                file_info.frame_count,
-                file_info.sha256,
-                file_info.metadata_text,
-            ],
-        )
-
-    def should_skip_step(
-        self,
-        *,
-        job_name: str,
-        pipeline_name: str,
-        step_index: int,
-        step_json: str,
-        output_file_hash: str,
-    ) -> bool:
-        row = self._conn.execute(
-            f"""
-            SELECT 1
-            FROM {STEP_EVENTS_TABLE}
-            WHERE step.event = 'completed'
-              AND job.name = ?
-              AND pipeline.name = ?
-              AND step.index = ?
-              AND step.step_json = ?
-              AND file.sha256 = ?
-            LIMIT 1
-            """,
-            [job_name, pipeline_name, step_index, step_json, output_file_hash],
-        ).fetchone()
-        return row is not None
-
-    def close(self) -> None:
-        self._conn.close()
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def hash_file_sha256(file_path: str) -> str:
-    h = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(8 * 1024 * 1024):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def execute_manual_download(
@@ -402,18 +44,14 @@ def execute_manual_download(
 
         detected_any = True
 
-        # Gather current sizes for currently present new files
         current_sizes = {}
         for fname in list(new_files):
             full = os.path.join(windows_downloads_dir, fname)
             try:
                 current_sizes[fname] = os.path.getsize(full)
             except OSError:
-                # file may have disappeared between listing and size check
                 continue
 
-        # Update stability tracking
-        # reset tracking for files that disappeared
         tracked_files = set(prev_sizes.keys())
         for f in list(tracked_files):
             if f not in current_sizes:
@@ -431,19 +69,15 @@ def execute_manual_download(
                     stable_counts[f] = 0
                 prev_sizes[f] = size
 
-        # Consider a file stable if its size hasn't changed for 2 consecutive checks
         stable_now = [
             f for f, c in stable_counts.items() if c >= 2 and f in current_sizes
         ]
 
-        # Only finish when we've seen at least one new file and all currently present new files are stable
-        # (this handles part -> final replacement because set(new_files) will change and we continue until stable)
         if (
             detected_any
             and new_files
             and all(f in stable_now for f in new_files if f in current_sizes)
         ):
-            # choose the stable file with latest mtime (final file if a part was replaced)
             candidates = [
                 f for f in new_files if f in current_sizes and f in stable_now
             ]
@@ -469,33 +103,146 @@ def execute_manual_download(
     return ExecutedStep(output_path=output_path, extension=extension)
 
 
-def trim(input_path: str, output_path: str, start: timedelta, end: timedelta) -> None:
-    command = [
-        "ffmpeg",
-        "-i",
-        input_path,
-        "-ss",
-        str(start),
-        "-to",
-        str(end),
-        "-c",
-        "copy",
-        output_path,
-        "-y",
-    ]
-    subprocess.run(command, check=True)
+PRORES_PROFILE_TO_FFMPEG = {
+    "proxy": "0",
+    "lt": "1",
+    "422": "2",
+    "hq": "3",
+    "4444": "4",
+    "4444xq": "5",
+}
 
 
-def execute_trim(
-    step: Trim, previous_step: ExecutedStep, output_path: str
+def get_ffmpeg_step_extension(step: Ffmpeg, previous_extension: str) -> str:
+    for operation in step.operations:
+        if isinstance(operation, Encode) and operation.codec == "prores":
+            return ".mov"
+    return previous_extension
+
+
+def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
+    if not step.operations:
+        raise ValueError("ffmpeg step requires at least one operation.")
+
+    trim_operation: Trim | None = None
+    copy_tracks_operation: CopyTracks | None = None
+    encode_operation: Encode | None = None
+
+    for operation in step.operations:
+        if isinstance(operation, Trim):
+            if trim_operation is not None:
+                raise ValueError("ffmpeg step supports at most one trim operation.")
+            trim_operation = operation
+            continue
+
+        if isinstance(operation, CopyTracks):
+            if copy_tracks_operation is not None:
+                raise ValueError(
+                    "ffmpeg step supports at most one copy_tracks operation."
+                )
+            copy_tracks_operation = operation
+            continue
+
+        if isinstance(operation, Encode):
+            if encode_operation is not None:
+                raise ValueError("ffmpeg step supports at most one encode operation.")
+            encode_operation = operation
+            continue
+
+        raise ValueError(f"Unsupported ffmpeg operation: {operation.type}")
+
+    if trim_operation is not None and trim_operation.end <= trim_operation.start:
+        raise ValueError("ffmpeg trim operation requires end to be after start.")
+
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Video input not found: {input_path}")
+
+    secondary_input_path: str | None = None
+    if copy_tracks_operation is not None:
+        secondary_input_path = copy_tracks_operation.source_path
+        if not os.path.exists(secondary_input_path):
+            raise FileNotFoundError(f"Source input not found: {secondary_input_path}")
+
+    should_drop_subtitles = encode_operation is not None
+
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+
+    primary_input_path = os.path.abspath(input_path)
+    command: List[str] = ["ffmpeg", "-y"]
+
+    if trim_operation is not None:
+        command.extend(
+            ["-ss", str(trim_operation.start), "-to", str(trim_operation.end)]
+        )
+    command.extend(["-i", primary_input_path])
+
+    if secondary_input_path is not None:
+        if trim_operation is not None:
+            command.extend(
+                ["-ss", str(trim_operation.start), "-to", str(trim_operation.end)]
+            )
+        command.extend(["-i", os.path.abspath(secondary_input_path)])
+
+    if secondary_input_path is not None:
+        command.extend(["-map", "0:v:0", "-map", "1:a?"])
+        if not should_drop_subtitles:
+            command.extend(["-map", "1:s?"])
+        command.extend(["-map_metadata", "1", "-map_chapters", "1"])
+        command.extend(["-c:a", "copy"])
+        if not should_drop_subtitles:
+            command.extend(["-c:s", "copy"])
+    else:
+        command.extend(["-map", "0:v", "-map", "0:a?"])
+        if not should_drop_subtitles:
+            command.extend(["-map", "0:s?"])
+        command.extend(["-map_metadata", "0", "-map_chapters", "0"])
+        if encode_operation is not None:
+            command.extend(["-c:a", "copy"])
+            if not should_drop_subtitles:
+                command.extend(["-c:s", "copy"])
+        else:
+            command.extend(["-c", "copy"])
+
+    if encode_operation is not None:
+        if encode_operation.codec != "prores":
+            raise ValueError(f"Unsupported encode codec: {encode_operation.codec}")
+        command.extend(
+            [
+                "-c:v",
+                "prores_ks",
+                "-profile:v",
+                PRORES_PROFILE_TO_FFMPEG[encode_operation.profile],
+                "-pix_fmt",
+                "yuv422p10le",
+            ]
+        )
+
+    command.append(output_path)
+
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "ffmpeg step failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+
+def execute_ffmpeg(
+    step: Ffmpeg, previous_step: ExecutedStep, output_path: str
 ) -> ExecutedStep:
-    trim(
+    run_ffmpeg_step(
         input_path=previous_step.output_path,
+        step=step,
         output_path=output_path,
-        start=step.start,
-        end=step.end,
     )
-    return ExecutedStep(output_path=output_path, extension=previous_step.extension)
+    return ExecutedStep(
+        output_path=output_path,
+        extension=get_ffmpeg_step_extension(step, previous_step.extension),
+    )
 
 
 def get_video_fps(input_path: str) -> float:
@@ -735,337 +482,3 @@ def execute_upscale(
         width=step.width,
     )
     return ExecutedStep(output_path=output_path, extension=previous_step.extension)
-
-
-def copy_tracks(video_input_path: str, source_path: str, output_path: str) -> None:
-    if not os.path.exists(video_input_path):
-        raise FileNotFoundError(f"Video input not found: {video_input_path}")
-    if not os.path.exists(source_path):
-        raise FileNotFoundError(f"Source input not found: {source_path}")
-
-    output_dir = os.path.dirname(os.path.abspath(output_path))
-    os.makedirs(output_dir, exist_ok=True)
-
-    command: List[str] = [
-        "ffmpeg",
-        "-i",
-        video_input_path,
-        "-i",
-        source_path,
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a?",
-        "-map",
-        "1:s?",
-        "-c",
-        "copy",
-        "-map_metadata",
-        "1",
-        "-map_chapters",
-        "1",
-        "-y",
-        output_path,
-    ]
-
-    try:
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError as exc:
-        details: List[str] = [
-            "Copy tracks step failed.",
-            f"Exit code: {exc.returncode}",
-            f"Command: {shlex.join(command)}",
-        ]
-        raise RuntimeError("\n\n".join(details)) from exc
-
-
-def execute_copy_tracks(
-    step: CopyTracks, previous_step: ExecutedStep, output_path: str
-) -> ExecutedStep:
-    copy_tracks(
-        video_input_path=previous_step.output_path,
-        source_path=step.source_path,
-        output_path=output_path,
-    )
-    return ExecutedStep(output_path=output_path, extension=previous_step.extension)
-
-
-def get_pipeline_artifact_dir(config: Config, pipeline_name: str) -> str:
-    return os.path.join(config.artifact_dir, config.job.name, pipeline_name)
-
-
-def resolve_initial_step(
-    config: Config,
-    pipeline_name: str,
-    input_step: Path | ManualDownload | Episode,
-) -> ExecutedStep:
-    if isinstance(input_step, ManualDownload):
-        output_path_without_extension = os.path.join(
-            get_pipeline_artifact_dir(config, pipeline_name),
-            input_step.__class__.__name__,
-        )
-        matches = glob.glob(f"{output_path_without_extension}*")
-        if matches and not config.full_refresh:
-            chosen = max(matches, key=os.path.getmtime)
-            return ExecutedStep(
-                output_path=chosen,
-                extension=os.path.splitext(chosen)[1],
-            )
-
-        return execute_manual_download(
-            step=input_step,
-            windows_downloads_dir=config.windows_downloads_dir,
-            output_path_without_extension=output_path_without_extension,
-        )
-
-    if isinstance(input_step, Path):
-        return ExecutedStep(
-            output_path=input_step.path,
-            extension=os.path.splitext(input_step.path)[1],
-        )
-
-    if isinstance(input_step, Episode):
-        raise ValueError("Episode input is not implemented yet.")
-
-    raise ValueError(f"Unsupported input type: {type(input_step).__name__}")
-
-
-def process_pipelines(loaded_config: LoadedConfig) -> None:
-    config = loaded_config.config
-    db_path = config.database_file_path
-    logger = StepEventLogger(db_path=db_path)
-    job_start_timestamp = utc_now()
-    n_pipelines = len(config.job.pipelines)
-
-    try:
-        for pipeline_index, (pipeline_name, pipeline) in enumerate(
-            config.job.pipelines.items()
-        ):
-            pipeline_start_timestamp = utc_now()
-            pipeline_dir = get_pipeline_artifact_dir(config, pipeline_name)
-            os.makedirs(pipeline_dir, exist_ok=True)
-
-            previous_step = resolve_initial_step(
-                config=config,
-                pipeline_name=pipeline_name,
-                input_step=pipeline.input,
-            )
-
-            total_n_steps = len(pipeline.steps)
-            pipeline_metadata_json = json.dumps(pipeline.metadata, sort_keys=True)
-            pipeline_input_json = json.dumps(
-                pipeline.input.model_dump(mode="json"),
-                sort_keys=True,
-            )
-
-            for step_index, step in enumerate(pipeline.steps):
-                is_last_step = step_index == (total_n_steps - 1)
-                is_last_pipeline = pipeline_index == (n_pipelines - 1)
-                step_type = step.type
-                step_json = json.dumps(step.model_dump(mode="json"), sort_keys=True)
-                output_extension = previous_step.extension
-                filename = (
-                    f"{pipeline_name}_step_{step_index}_{step.__class__.__name__}"
-                    f"{output_extension}"
-                )
-
-                if is_last_step:
-                    os.makedirs(config.output_dir, exist_ok=True)
-                    intended_output = os.path.join(
-                        config.output_dir,
-                        f"{pipeline_name}{output_extension}",
-                    )
-                else:
-                    intended_output = os.path.join(pipeline_dir, filename)
-
-                start_ts = utc_now()
-                start_file_info = probe_media_file_info(
-                    intended_output, include_hash=False
-                )
-                logger.log_step_event(
-                    event_timestamp=start_ts,
-                    chart_path=loaded_config.chart_path,
-                    chart_json=loaded_config.chart_json,
-                    rendered_config_json=loaded_config.rendered_config_json,
-                    job_name=config.job.name,
-                    pipeline_index=pipeline_index,
-                    n_pipelines=n_pipelines,
-                    job_end_timestamp=None,
-                    pipeline_name=pipeline_name,
-                    pipeline_metadata_json=pipeline_metadata_json,
-                    pipeline_input_json=pipeline_input_json,
-                    total_n_steps=total_n_steps,
-                    pipeline_start_timestamp=pipeline_start_timestamp,
-                    pipeline_end_timestamp=None,
-                    step_index=step_index,
-                    step_type=step_type,
-                    step_json=step_json,
-                    step_event="start",
-                    job_start_timestamp=job_start_timestamp,
-                    file_info=start_file_info,
-                    error_message=None,
-                )
-
-                if not config.full_refresh and os.path.exists(intended_output):
-                    existing_file_info = probe_media_file_info(
-                        intended_output,
-                        include_hash=True,
-                    )
-                    existing_output_hash = existing_file_info.sha256
-                    if existing_output_hash is None:
-                        existing_output_hash = hash_file_sha256(intended_output)
-                    should_skip = logger.should_skip_step(
-                        job_name=config.job.name,
-                        pipeline_name=pipeline_name,
-                        step_index=step_index,
-                        step_json=step_json,
-                        output_file_hash=existing_output_hash,
-                    )
-                    if should_skip:
-                        skip_ts = utc_now()
-                        pipeline_end_timestamp = skip_ts if is_last_step else None
-                        job_end_timestamp = (
-                            skip_ts if is_last_step and is_last_pipeline else None
-                        )
-                        logger.log_step_event(
-                            event_timestamp=skip_ts,
-                            chart_path=loaded_config.chart_path,
-                            chart_json=loaded_config.chart_json,
-                            rendered_config_json=loaded_config.rendered_config_json,
-                            job_name=config.job.name,
-                            pipeline_index=pipeline_index,
-                            n_pipelines=n_pipelines,
-                            job_end_timestamp=job_end_timestamp,
-                            pipeline_name=pipeline_name,
-                            pipeline_metadata_json=pipeline_metadata_json,
-                            pipeline_input_json=pipeline_input_json,
-                            total_n_steps=total_n_steps,
-                            pipeline_start_timestamp=pipeline_start_timestamp,
-                            pipeline_end_timestamp=pipeline_end_timestamp,
-                            step_index=step_index,
-                            step_type=step_type,
-                            step_json=step_json,
-                            step_event="skipped",
-                            job_start_timestamp=job_start_timestamp,
-                            file_info=existing_file_info,
-                            error_message=None,
-                        )
-                        previous_step = ExecutedStep(
-                            output_path=intended_output,
-                            extension=output_extension,
-                        )
-                        continue
-
-                try:
-                    if isinstance(step, Trim):
-                        previous_step = execute_trim(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Interpolate):
-                        previous_step = execute_interpolate(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Upscale):
-                        previous_step = execute_upscale(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, CopyTracks):
-                        previous_step = execute_copy_tracks(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    else:
-                        raise ValueError(f"Unsupported step type: {step_type}")
-                except Exception as exc:
-                    failed_ts = utc_now()
-                    failed_file_info = probe_media_file_info(
-                        intended_output, include_hash=False
-                    )
-                    logger.log_step_event(
-                        event_timestamp=failed_ts,
-                        chart_path=loaded_config.chart_path,
-                        chart_json=loaded_config.chart_json,
-                        rendered_config_json=loaded_config.rendered_config_json,
-                        job_name=config.job.name,
-                        pipeline_index=pipeline_index,
-                        n_pipelines=n_pipelines,
-                        job_end_timestamp=failed_ts,
-                        pipeline_name=pipeline_name,
-                        pipeline_metadata_json=pipeline_metadata_json,
-                        pipeline_input_json=pipeline_input_json,
-                        total_n_steps=total_n_steps,
-                        pipeline_start_timestamp=pipeline_start_timestamp,
-                        pipeline_end_timestamp=failed_ts,
-                        step_index=step_index,
-                        step_type=step_type,
-                        step_json=step_json,
-                        step_event="failed",
-                        job_start_timestamp=job_start_timestamp,
-                        file_info=failed_file_info,
-                        error_message=str(exc),
-                    )
-                    raise
-
-                completed_ts = utc_now()
-                completed_file_info = probe_media_file_info(
-                    previous_step.output_path,
-                    include_hash=True,
-                )
-                pipeline_end_timestamp = completed_ts if is_last_step else None
-                job_end_timestamp = (
-                    completed_ts if is_last_step and is_last_pipeline else None
-                )
-                logger.log_step_event(
-                    event_timestamp=completed_ts,
-                    chart_path=loaded_config.chart_path,
-                    chart_json=loaded_config.chart_json,
-                    rendered_config_json=loaded_config.rendered_config_json,
-                    job_name=config.job.name,
-                    pipeline_index=pipeline_index,
-                    n_pipelines=n_pipelines,
-                    job_end_timestamp=job_end_timestamp,
-                    pipeline_name=pipeline_name,
-                    pipeline_metadata_json=pipeline_metadata_json,
-                    pipeline_input_json=pipeline_input_json,
-                    total_n_steps=total_n_steps,
-                    pipeline_start_timestamp=pipeline_start_timestamp,
-                    pipeline_end_timestamp=pipeline_end_timestamp,
-                    step_index=step_index,
-                    step_type=step_type,
-                    step_json=step_json,
-                    step_event="completed",
-                    job_start_timestamp=job_start_timestamp,
-                    file_info=completed_file_info,
-                    error_message=None,
-                )
-    finally:
-        logger.close()
-
-
-def load_config() -> LoadedConfig:
-    chart_path = os.environ["CHART_PATH"]
-    with open(chart_path, "r") as f:
-        chart = Chart.model_validate(yaml.safe_load(f))
-
-    with open(chart.config_template_path, "r") as f:
-        rendered_config = jinja2.Template(f.read()).render(**chart.values)
-
-    config = Config.model_validate(yaml.safe_load(rendered_config))
-    return LoadedConfig(
-        config=config,
-        chart_path=chart_path,
-        chart_json=json.dumps(chart.model_dump(mode="json"), sort_keys=True),
-        rendered_config_json=json.dumps(config.model_dump(mode="json"), sort_keys=True),
-    )
-
-
-def main() -> None:
-    loaded_config = load_config()
-    process_pipelines(loaded_config)

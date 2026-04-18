@@ -76,3 +76,6 @@ esrgan-upscale:
 clean-all:
 	rm -rf "$(ARTIFACT_DIR)"
 	rm -f "$(PIPELINE_DB_PATH)" "$(PIPELINE_DB_PATH).wal"
+
+make cli:
+	uv run src/pipe/cli.py

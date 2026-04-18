@@ -1,0 +1,395 @@
+full_refresh: {{full_refresh}}
+windows_downloads_dir: {{windows_downloads_dir}}
+database_file_path: "{{database_file_path}}"
+artifact_dir: data
+output_dir: /mnt/e/_/active/projects/little-busters/media
+shows:
+  little_busters:
+    path: /mnt/e/_/active/projects/little-busters/[neoHEVC] Little Busters! [Season 1 + 2 + Movie + Specials] [BD 1080p x265 HEVC AAC] [Dual Audio]/Season 1
+    episode_pattern: Little Busters! - S{:02d}E{:02d}.mkv
+job:
+  name: little_busters
+  pipelines:
+    kengo_eye_patch_looking_down_falling:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s1e25
+        show: little_busters
+        season: 1
+        episode: 25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:13:00
+              end: 0:13:10
+
+    miyuki_and_kengo_talk_clutch_face:
+      metadata:
+        characters:
+          - miyuki
+          - kengo
+      input: *lb_s1e25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:08:00
+              end: 0:08:10
+            - type: encode
+              codec: prores
+              profile: '422'
+
+    kengo_cry_and_silhouette:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s1e25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:16:00
+              end: 0:16:10
+
+    kengo_rise:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s1e25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:17:30
+              end: 0:17:40
+
+    kengo_fighting_face:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s1e25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:19:00
+              end: 0:19:10
+
+    girl_silhouette:
+      metadata:
+        characters:
+          - girl
+      input: *lb_s1e25
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:20:15
+              end: 0:20:25
+
+    kengo_shocked:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s2e6
+        show: little_busters
+        season: 2
+        episode: 6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:18:00
+              end: 0:18:10
+
+    kengo_screaming_fighting_kyousuke:
+      metadata:
+        characters:
+          - kengo
+          - kyousuke
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:18:00
+              end: 0:18:10
+
+    kengo_open_eye:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:04:16
+              end: 0:04:26
+
+    kengo_lift_head_and_lower:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:05:38
+              end: 0:05:48
+
+    kengo_stand_up_smile:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:06:00
+              end: 0:06:10
+
+    kyousuke_eye_tremble:
+      metadata:
+        characters:
+          - kyousuke
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:09:50
+              end: 0:10:00
+
+    kengo_hair_wave_wind_angry_face:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:11:50
+              end: 0:12:00
+
+    camera_pan_past_kengo:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:16:00
+              end: 0:16:10
+
+    kengo_turn_head:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:16:59
+              end: 0:17:09
+
+    kengo_brace_with_bat_determined:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e6
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:17:30
+              end: 0:17:40
+
+    kengo_clench_hand_drop:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s2e7
+        show: little_busters
+        season: 2
+        episode: 7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:19:30
+              end: 0:19:40
+
+    kengo_masato_fight:
+      metadata:
+        characters:
+          - kengo
+          - masato
+      input: *lb_s2e7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:03:00
+              end: 0:03:10
+
+    kengo_open_eye_episode_2_7:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:05:54
+              end: 0:06:04
+
+    kengo_smile_move_head:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:06:18
+              end: 0:06:30
+
+    kengo_rise_from_sitting_smile_walk_away:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:12:50
+              end: 0:13:00
+
+    kengo_low_angle_turn_around:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e7
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:19:00
+              end: 0:19:10
+
+    kengo_mysterious_behind_tree:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s2e8
+        show: little_busters
+        season: 2
+        episode: 8
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:23:00
+              end: 0:23:10
+
+    kengo_turn_scared:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s2e9
+        show: little_busters
+        season: 2
+        episode: 9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:16:40
+              end: 0:16:50
+
+    scared_eyes_closeup:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:11:24
+              end: 0:11:34
+
+    scared_hands_shaking:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:19:50
+              end: 0:20:00
+
+    kengo_given_up:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:20:50
+              end: 0:21:00
+
+    kengo_fall_to_ground_given_up:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:20:58
+              end: 0:21:08
+
+    kengo_cry_fold_happy_sad_smile:
+      metadata:
+        characters:
+          - kengo
+      input: *lb_s2e9
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:22:00
+              end: 0:22:10
+
+    kengo_cry_episode_2_11:
+      metadata:
+        characters:
+          - kengo
+      input: &lb_s2e11
+        show: little_busters
+        season: 2
+        episode: 11
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 0:15:00
+              end: 0:15:10
