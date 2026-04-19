@@ -20,3 +20,26 @@ job:
           width: 2160
         - type: interpolate
           fps: 240
+
+    colmap_camera_path:
+      metadata: {}
+      input:
+        link: {{pipelines["colmap_camera_path"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:02
+              end: 00:00:08
+        - type: colmap
+          frame_rate: 8
+          max_frames: 120
+          image_format: jpg
+          camera_mode: single
+          sequential_overlap: 15
+          loop_detection: true
+          min_num_matches: 20
+          max_num_models: 1
+          min_model_size: 10
+          random_seed: 0
+          use_gpu: true

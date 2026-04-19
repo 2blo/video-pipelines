@@ -43,6 +43,23 @@ class Upscale(BaseModel):
     width: int
 
 
+class Colmap(BaseModel):
+    type: Literal["colmap"]
+    mapper: Literal["colmap", "glomap"] = "colmap"
+    frame_rate: float | None = None
+    max_frames: int | None = None
+    image_format: Literal["jpg", "png"] = "jpg"
+    max_image_size: int = 4096
+    camera_mode: Literal["auto", "single"] = "single"
+    sequential_overlap: int = 10
+    loop_detection: bool = True
+    min_num_matches: int = 15
+    max_num_models: int = 1
+    min_model_size: int = 10
+    random_seed: int = 0
+    use_gpu: bool = True
+
+
 class CopyTracks(BaseModel):
     type: Literal["copy_tracks"]
     source_path: str
@@ -56,7 +73,7 @@ class Ffmpeg(BaseModel):
     operations: List[FfmpegOperation]
 
 
-Step = Annotated[Ffmpeg | Interpolate | Upscale, Field(discriminator="type")]
+Step = Annotated[Ffmpeg | Interpolate | Upscale | Colmap, Field(discriminator="type")]
 
 
 class Pipeline(BaseModel):

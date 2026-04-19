@@ -1,0 +1,32 @@
+full_refresh: {{full_refresh}}
+windows_downloads_dir: {{windows_downloads_dir}}
+database_file_path: "{{database_file_path}}"
+artifact_dir: data
+output_dir: /mnt/e/_/active/projects/switzerland/media
+shows: {}
+job:
+  name: nier
+  pipelines:
+    nier:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: colmap
+          mapper: glomap
+          image_format: jpg
+          max_image_size: 4096
+          camera_mode: single
+          # sequential_overlap: 15
+          sequential_overlap: 40
+          loop_detection: false
+          min_num_matches: 15
+          max_num_models: 1
+          min_model_size: 10
+          random_seed: 0
+          use_gpu: true

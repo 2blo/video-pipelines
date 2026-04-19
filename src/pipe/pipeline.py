@@ -11,6 +11,7 @@ import jinja2
 import yaml
 from pipe.chart import Chart
 from pipe.config import (
+    Colmap,
     Config,
     Episode,
     Ffmpeg,
@@ -21,6 +22,7 @@ from pipe.config import (
 )
 from pipe.ops import (
     ExecutedStep,
+    execute_colmap,
     execute_ffmpeg,
     execute_interpolate,
     execute_manual_download,
@@ -488,6 +490,8 @@ def run_config(
                     output_extension = get_ffmpeg_step_extension(
                         step, previous_step.extension
                     )
+                elif isinstance(step, Colmap):
+                    output_extension = ".json"
                 else:
                     output_extension = previous_step.extension
                 filename = (
@@ -597,6 +601,12 @@ def run_config(
                         )
                     elif isinstance(step, Upscale):
                         previous_step = execute_upscale(
+                            step=step,
+                            previous_step=previous_step,
+                            output_path=intended_output,
+                        )
+                    elif isinstance(step, Colmap):
+                        previous_step = execute_colmap(
                             step=step,
                             previous_step=previous_step,
                             output_path=intended_output,

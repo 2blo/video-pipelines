@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import shlex
@@ -5,9 +6,10 @@ import shutil
 import subprocess
 import webbrowser
 from time import sleep
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from pipe.config import (
+    Colmap,
     CopyTracks,
     Encode,
     Ffmpeg,
@@ -22,6 +24,64 @@ from pydantic import BaseModel
 class ExecutedStep(BaseModel):
     output_path: str
     extension: str
+
+
+def _run_subprocess(command: List[str], error_prefix: str) -> None:
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            error_prefix,
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+
+def _qvec_to_rotmat(qw: float, qx: float, qy: float, qz: float) -> List[List[float]]:
+    q_norm = math.sqrt((qw * qw) + (qx * qx) + (qy * qy) + (qz * qz))
+    if q_norm == 0:
+        raise ValueError("Invalid zero-norm quaternion in COLMAP output.")
+
+    w = qw / q_norm
+    x = qx / q_norm
+    y = qy / q_norm
+    z = qz / q_norm
+
+    return [
+        [
+            1 - (2 * y * y) - (2 * z * z),
+            (2 * x * y) - (2 * z * w),
+            (2 * x * z) + (2 * y * w),
+        ],
+        [
+            (2 * x * y) + (2 * z * w),
+            1 - (2 * x * x) - (2 * z * z),
+            (2 * y * z) - (2 * x * w),
+        ],
+        [
+            (2 * x * z) - (2 * y * w),
+            (2 * y * z) + (2 * x * w),
+            1 - (2 * x * x) - (2 * y * y),
+        ],
+    ]
+
+
+def _camera_center_from_qvec_tvec(
+    qw: float,
+    qx: float,
+    qy: float,
+    qz: float,
+    tx: float,
+    ty: float,
+    tz: float,
+) -> List[float]:
+    rotation = _qvec_to_rotmat(qw, qx, qy, qz)
+    return [
+        -((rotation[0][0] * tx) + (rotation[1][0] * ty) + (rotation[2][0] * tz)),
+        -((rotation[0][1] * tx) + (rotation[1][1] * ty) + (rotation[2][1] * tz)),
+        -((rotation[0][2] * tx) + (rotation[1][2] * ty) + (rotation[2][2] * tz)),
+    ]
 
 
 def execute_manual_download(
@@ -243,6 +303,310 @@ def execute_ffmpeg(
         output_path=output_path,
         extension=get_ffmpeg_step_extension(step, previous_step.extension),
     )
+
+
+def execute_colmap(
+    step: Colmap,
+    previous_step: ExecutedStep,
+    output_path: str,
+) -> ExecutedStep:
+    try:
+        import pycolmap  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise RuntimeError(
+            "pycolmap is required for the colmap step. Install it with `uv sync` after adding the dependency."
+        ) from exc
+
+    input_video_path = os.path.abspath(previous_step.output_path)
+    if not os.path.exists(input_video_path):
+        raise FileNotFoundError(f"Video input not found: {input_video_path}")
+
+    output_path_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_path_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_path_abs))[0]
+    workspace_dir = os.path.join(output_dir, f"{output_stem}_colmap")
+    images_dir = os.path.join(workspace_dir, "images")
+    sparse_dir = os.path.join(workspace_dir, "sparse")
+    database_path = os.path.join(workspace_dir, "database.db")
+
+    if os.path.isdir(workspace_dir):
+        shutil.rmtree(workspace_dir)
+    os.makedirs(images_dir, exist_ok=True)
+    os.makedirs(sparse_dir, exist_ok=True)
+
+    frame_pattern = os.path.join(images_dir, f"frame_%06d.{step.image_format}")
+    ffmpeg_command: List[str] = ["ffmpeg", "-y", "-i", input_video_path]
+    if step.frame_rate is not None:
+        ffmpeg_command.extend(["-vf", f"fps={step.frame_rate}"])
+    if step.max_frames is not None:
+        ffmpeg_command.extend(["-frames:v", str(step.max_frames)])
+    ffmpeg_command.append(frame_pattern)
+
+    _run_subprocess(ffmpeg_command, "Failed to extract frames for COLMAP step.")
+
+    extracted_frames = sorted(
+        [
+            f
+            for f in os.listdir(images_dir)
+            if f.lower().endswith(f".{step.image_format}")
+        ]
+    )
+    if not extracted_frames:
+        raise RuntimeError(
+            "No frames were extracted for COLMAP. Check input video and frame extraction options."
+        )
+
+    sampling_fps = step.frame_rate
+    if sampling_fps is None:
+        sampling_fps = get_video_fps(input_video_path)
+
+    pc: Any = pycolmap
+
+    camera_mode = pc.CameraMode.SINGLE
+    if step.camera_mode == "auto":
+        camera_mode = pc.CameraMode.AUTO
+
+    device = pc.Device.auto if step.use_gpu else pc.Device.cpu
+    if (
+        hasattr(pc, "FeatureExtractionOptions")
+        and hasattr(pc, "FeatureMatchingOptions")
+        and hasattr(pc, "SequentialPairingOptions")
+    ):
+        feature_extraction_options = pc.FeatureExtractionOptions()
+        feature_extraction_options.max_image_size = step.max_image_size
+        if hasattr(feature_extraction_options, "use_gpu"):
+            feature_extraction_options.use_gpu = step.use_gpu
+
+        pc.extract_features(
+            database_path=database_path,
+            image_path=images_dir,
+            camera_mode=camera_mode,
+            extraction_options=feature_extraction_options,
+            device=device,
+        )
+
+        sequential_pairing_options = pc.SequentialPairingOptions()
+        sequential_pairing_options.overlap = step.sequential_overlap
+        sequential_pairing_options.loop_detection = step.loop_detection
+        feature_matching_options = pc.FeatureMatchingOptions()
+        if hasattr(feature_matching_options, "use_gpu"):
+            feature_matching_options.use_gpu = step.use_gpu
+
+        pc.match_sequential(
+            database_path=database_path,
+            matching_options=feature_matching_options,
+            pairing_options=sequential_pairing_options,
+            device=device,
+        )
+    else:
+        sift_extraction_options = pc.SiftExtractionOptions()
+        sift_extraction_options.max_image_size = step.max_image_size
+        if hasattr(sift_extraction_options, "use_gpu"):
+            sift_extraction_options.use_gpu = step.use_gpu
+
+        pc.extract_features(
+            database_path=database_path,
+            image_path=images_dir,
+            camera_mode=camera_mode,
+            sift_options=sift_extraction_options,
+            device=device,
+        )
+
+        sequential_matching_options = pc.SequentialMatchingOptions()
+        sequential_matching_options.overlap = step.sequential_overlap
+        sequential_matching_options.loop_detection = step.loop_detection
+        sift_matching_options = pc.SiftMatchingOptions()
+        if hasattr(sift_matching_options, "use_gpu"):
+            sift_matching_options.use_gpu = step.use_gpu
+
+        pc.match_sequential(
+            database_path=database_path,
+            sift_options=sift_matching_options,
+            matching_options=sequential_matching_options,
+            device=device,
+        )
+
+    use_global_mapper = (
+        step.mapper == "glomap"
+        and hasattr(pc, "global_mapping")
+        and hasattr(pc, "GlobalPipelineOptions")
+    )
+    if not use_global_mapper:
+        if step.mapper == "glomap":
+            print(
+                "Requested mapper='glomap', but installed pycolmap does not expose global mapping. Falling back to incremental mapping."
+            )
+
+        incremental_options = pc.IncrementalPipelineOptions()
+        incremental_options.min_num_matches = step.min_num_matches
+        incremental_options.max_num_models = step.max_num_models
+        incremental_options.min_model_size = step.min_model_size
+        if hasattr(incremental_options, "random_seed"):
+            incremental_options.random_seed = step.random_seed
+        if hasattr(incremental_options, "multiple_models"):
+            incremental_options.multiple_models = step.max_num_models > 1
+
+        reconstructions = pc.incremental_mapping(
+            database_path=database_path,
+            image_path=images_dir,
+            output_path=sparse_dir,
+            options=incremental_options,
+        )
+
+        if not reconstructions:
+            raise RuntimeError("COLMAP did not reconstruct any model.")
+
+        best_model_idx, best_reconstruction = max(
+            reconstructions.items(),
+            key=lambda pair: (
+                pair[1].num_reg_images(),
+                pair[1].num_points3D(),
+            ),
+        )
+    else:
+        if hasattr(pc, "calibrate_view_graph"):
+            pc.calibrate_view_graph(database_path=database_path)
+
+        global_options = pc.GlobalPipelineOptions()
+        global_options.mapper.global_positioning.use_gpu = step.use_gpu
+        global_options.mapper.bundle_adjustment.ceres.use_gpu = step.use_gpu
+        reconstructions = pc.global_mapping(
+            database_path=database_path,
+            image_path=images_dir,
+            output_path=sparse_dir,
+            options=global_options,
+        )
+
+        if not reconstructions:
+            raise RuntimeError("COLMAP global mapper did not reconstruct any model.")
+
+        best_model_idx, best_reconstruction = max(
+            reconstructions.items(),
+            key=lambda pair: (
+                pair[1].num_reg_images(),
+                pair[1].num_points3D(),
+            ),
+        )
+
+    best_model_dir = os.path.join(sparse_dir, str(best_model_idx))
+    os.makedirs(best_model_dir, exist_ok=True)
+    best_reconstruction.write_text(best_model_dir)
+    best_reconstruction.write_text(sparse_dir)
+
+    cameras_path = os.path.join(sparse_dir, "cameras.txt")
+    images_path = os.path.join(sparse_dir, "images.txt")
+
+    cameras: Dict[int, dict] = {}
+    with open(cameras_path, "r") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            tokens = stripped.split()
+            camera_id = int(tokens[0])
+            cameras[camera_id] = {
+                "camera_id": camera_id,
+                "model": tokens[1],
+                "width": int(tokens[2]),
+                "height": int(tokens[3]),
+                "params": [float(value) for value in tokens[4:]],
+            }
+
+    trajectory_rows: List[dict] = []
+    with open(images_path, "r") as f:
+        lines = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+    for i in range(0, len(lines), 2):
+        tokens = lines[i].split()
+        image_id = int(tokens[0])
+        qw = float(tokens[1])
+        qx = float(tokens[2])
+        qy = float(tokens[3])
+        qz = float(tokens[4])
+        tx = float(tokens[5])
+        ty = float(tokens[6])
+        tz = float(tokens[7])
+        camera_id = int(tokens[8])
+        image_name = tokens[9]
+
+        frame_idx = None
+        if image_name.startswith("frame_"):
+            stem = image_name.split(".")[0]
+            suffix = stem.replace("frame_", "")
+            if suffix.isdigit():
+                frame_idx = int(suffix)
+
+        timestamp_seconds = None
+        if frame_idx is not None and sampling_fps > 0:
+            timestamp_seconds = (frame_idx - 1) / sampling_fps
+
+        trajectory_rows.append(
+            {
+                "image_id": image_id,
+                "image_name": image_name,
+                "frame_index": frame_idx,
+                "timestamp_seconds": timestamp_seconds,
+                "camera_id": camera_id,
+                "qvec_world_to_cam": [qw, qx, qy, qz],
+                "tvec_world_to_cam": [tx, ty, tz],
+                "camera_center_world": _camera_center_from_qvec_tvec(
+                    qw=qw,
+                    qx=qx,
+                    qy=qy,
+                    qz=qz,
+                    tx=tx,
+                    ty=ty,
+                    tz=tz,
+                ),
+            }
+        )
+
+    trajectory_rows.sort(
+        key=lambda row: (
+            row["frame_index"] if row["frame_index"] is not None else 10**12,
+            row["image_name"],
+        )
+    )
+
+    mean_reprojection_error = None
+    try:
+        mean_reprojection_error = best_reconstruction.compute_mean_reprojection_error()
+    except Exception:
+        mean_reprojection_error = None
+
+    output = {
+        "input_video_path": input_video_path,
+        "workspace_dir": workspace_dir,
+        "images_dir": images_dir,
+        "database_path": database_path,
+        "sparse_models_dir": sparse_dir,
+        "mapper": step.mapper,
+        "best_model_index": best_model_idx,
+        "best_model_dir": best_model_dir,
+        "best_model_text_dir": sparse_dir,
+        "sampling_fps": sampling_fps,
+        "num_extracted_frames": len(extracted_frames),
+        "num_reconstructed_models": len(reconstructions),
+        "best_model_summary": {
+            "num_images": best_reconstruction.num_images(),
+            "num_registered_images": best_reconstruction.num_reg_images(),
+            "num_points3D": best_reconstruction.num_points3D(),
+            "mean_reprojection_error": mean_reprojection_error,
+        },
+        "cameras": [cameras[camera_id] for camera_id in sorted(cameras.keys())],
+        "trajectory": trajectory_rows,
+    }
+
+    with open(output_path_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+    return ExecutedStep(output_path=output_path_abs, extension=".json")
 
 
 def get_video_fps(input_path: str) -> float:
