@@ -30,3 +30,4 @@ job:
           min_model_size: 10
           random_seed: 0
           use_gpu: true
+          extract_depth: true

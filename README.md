@@ -1,56 +1,33 @@
 # Video pipelines
 
-recommended pipeline for real life footage:
+Recommended pipeline for real life footage:
 
-what is better to in after effects vs blender:
-blender:
-- import and animate models
-- build environments
+- script:
+  - upscale - cheaper than after interpolation, but may interfere with 3d camera reconstruction, if so do after, but before depth
+  - interpolate to 240fps - may interfere with 3d camera reconstruction, if so do after, but before depth
+  - extract 3d camera (effects compatible)
+  - get depth, doesnt matter if its before or after 3d camera.
+- blender:
+  - make and animate 3d characters and environments, export as models
+- after effects:
+  - import 3d models, anchor using 3d camera
+  - composite character and footage, block out character with depth map
+  - velocity
+  - import 3d camera.
+  - apply effects on 3d character / matte layer / 3d camera movement
 
-after effects:
-- fog / depth effects
+Unused:
 
-ideal:
-1. stabilize
-2. upscale
-3. interpolate to 240fps
-4. reconstruct 3d camera.
-5.
+- restore / sharpen - maybe redundant with upscaling,
+- stabilize - optional if using gimball
 
+Alternatives:
 
-realistic:
-
-decisions
-- fine to have same velocity on clip as animation (same as sfm)
-- i dont need to stabilize if i use a gyro probably.
-
-
-questions:
-- is stabilization deterministic layer / operation that can be applied independently on dfferent videos? of so, we can use it separately on footage and 3d model to avoid having to pre bake everything and losing depth maps etc.
-
-
-pipeline
-
-1. record in 4k 30 fps without stabilization.
-2. reconstruct 3d camera.
-3. add 3d models.
-4. render video.
-5. stabilize.
-6. interpolate
-
-
-
-nier example:
-
-funnel:
-- velocity
-- upscale
-- interpolate
-- restore / sharpen
-- apply effects on 3d character matte layer,
-- add environmentral effects, anchor using 3d camera, use depth map for occlusion and effects.
-
-- script: extract 3d camera
-- blender: make and animate 3d character, export only character with nothing else
-- script: get depth map from footage
-- after effecs: composite character and footage, block out character with depth map
+- import 3d camera to blender and composite with character
+  - cons:
+    - character velocity needs to match footage, else movement will drift
+    - slower to iterate (e.g., modify character position)
+  - pros:
+    - may have more control over lightning etc
+    - may be more performant vs working on a exported video layer.
+- 3d camera track can be swapper with after effects built in tracker.

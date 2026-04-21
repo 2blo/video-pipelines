@@ -58,6 +58,7 @@ class Colmap(BaseModel):
     min_model_size: int = 10
     random_seed: int = 0
     use_gpu: bool = True
+    extract_depth: bool = False
 
 
 class CopyTracks(BaseModel):

@@ -29,6 +29,13 @@ class ExecutedStep(BaseModel):
 def _run_subprocess(command: List[str], error_prefix: str) -> None:
     try:
         subprocess.run(command, check=True)
+    except FileNotFoundError as exc:
+        missing_cmd_details: List[str] = [
+            error_prefix,
+            f"Command not found: {command[0]}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(missing_cmd_details)) from exc
     except subprocess.CalledProcessError as exc:
         details: List[str] = [
             error_prefix,
@@ -305,6 +312,195 @@ def execute_ffmpeg(
     )
 
 
+def _read_colmap_dense_array(file_path: str) -> Any:
+    import numpy as np  # pyright: ignore[reportMissingImports]
+
+    with open(file_path, "rb") as f:
+        header_parts: List[bytes] = []
+        current = bytearray()
+        while len(header_parts) < 3:
+            char = f.read(1)
+            if not char:
+                raise RuntimeError(f"Invalid COLMAP dense array header: {file_path}")
+            if char == b"&":
+                header_parts.append(bytes(current))
+                current.clear()
+            else:
+                current.extend(char)
+
+        width = int(header_parts[0].decode("ascii"))
+        height = int(header_parts[1].decode("ascii"))
+        channels = int(header_parts[2].decode("ascii"))
+
+        data = np.frombuffer(f.read(), dtype=np.float32)
+
+    expected_size = width * height * channels
+    if data.size != expected_size:
+        raise RuntimeError(
+            f"Unexpected COLMAP dense array size for {file_path}: "
+            f"expected {expected_size} float32 values, got {data.size}"
+        )
+
+    if channels == 1:
+        return data.reshape((height, width))
+
+    return data.reshape((height, width, channels))
+
+
+def _extract_depth_maps(
+    pycolmap: Any,
+    workspace_dir: str,
+    sparse_dir: str,
+    best_model_dir: str,
+    images_dir: str,
+    trajectory_rows: List[dict],
+    use_gpu: bool,
+) -> str:
+    try:
+        import numpy as np  # pyright: ignore[reportMissingImports]
+        from PIL import Image  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise RuntimeError(
+            "numpy and Pillow are required for depth extraction. Install with `uv sync`."
+        ) from exc
+
+    dense_dir = os.path.join(workspace_dir, "dense")
+    os.makedirs(dense_dir, exist_ok=True)
+
+    undistorted_dir = os.path.join(dense_dir, "undistorted")
+    if os.path.isdir(undistorted_dir):
+        shutil.rmtree(undistorted_dir)
+    os.makedirs(undistorted_dir, exist_ok=True)
+
+    undistort_errors: List[str] = []
+    undistort_variants: List[dict] = [
+        {
+            "input_path": best_model_dir,
+            "image_path": images_dir,
+            "output_path": undistorted_dir,
+            "output_type": "COLMAP",
+        },
+        {
+            "input_path": sparse_dir,
+            "image_path": images_dir,
+            "output_path": undistorted_dir,
+            "output_type": "COLMAP",
+        },
+    ]
+    for kwargs in undistort_variants:
+        try:
+            pycolmap.undistort_images(**kwargs)
+            undistort_errors = []
+            break
+        except Exception as exc:
+            undistort_errors.append(str(exc))
+
+    if undistort_errors:
+        try:
+            pycolmap.undistort_images(
+                undistorted_dir,
+                best_model_dir,
+                images_dir,
+            )
+        except Exception as exc:
+            undistort_errors.append(str(exc))
+            raise RuntimeError(
+                "Image undistortion failed using pycolmap API variants. "
+                "Your pypi pycolmap build may not include dense reconstruction APIs. "
+                f"Errors: {' | '.join(undistort_errors)}"
+            ) from exc
+
+    patch_errors: List[str] = []
+
+    try:
+        patch_options = pycolmap.PatchMatchOptions()
+        if hasattr(patch_options, "geom_consistency"):
+            patch_options.geom_consistency = True
+        if hasattr(patch_options, "gpu_index"):
+            patch_options.gpu_index = "0" if use_gpu else "-1"
+
+        pycolmap.patch_match_stereo(
+            workspace_path=undistorted_dir,
+            workspace_format="COLMAP",
+            options=patch_options,
+        )
+    except Exception as exc:
+        patch_errors.append(str(exc))
+        try:
+            pycolmap.patch_match_stereo(
+                workspace_path=undistorted_dir,
+                workspace_format="COLMAP",
+            )
+        except Exception as exc2:
+            patch_errors.append(str(exc2))
+            if any(
+                "requires CUDA" in error_text or "CUDA" in error_text
+                for error_text in patch_errors
+            ):
+                raise RuntimeError(
+                    "Stereo depth extraction requires CUDA in this pycolmap build, "
+                    "but CUDA is not available in the current runtime."
+                ) from exc2
+
+            raise RuntimeError(
+                "Stereo depth extraction failed with pycolmap API variants. "
+                "Your pypi pycolmap build may not include dense reconstruction APIs. "
+                f"Errors: {' | '.join(patch_errors)}"
+            ) from exc2
+
+    depth_output_dir = os.path.join(dense_dir, "depth_maps")
+    os.makedirs(depth_output_dir, exist_ok=True)
+
+    stereo_dir = os.path.join(undistorted_dir, "stereo")
+    depth_maps_dir = os.path.join(stereo_dir, "depth_maps")
+
+    if not os.path.exists(depth_maps_dir):
+        raise RuntimeError(
+            f"Depth maps directory not found: {depth_maps_dir}. "
+            "PatchMatchStereo may have failed."
+        )
+
+    for row in trajectory_rows:
+        image_name = row["image_name"]
+        frame_idx = row["frame_index"]
+
+        depth_file = os.path.splitext(image_name)[0] + ".geometric.bin"
+        depth_path = os.path.join(depth_maps_dir, depth_file)
+
+        if not os.path.exists(depth_path):
+            continue
+
+        try:
+            if hasattr(pycolmap, "read_array"):
+                depth_array = pycolmap.read_array(depth_path)
+            else:
+                depth_array = _read_colmap_dense_array(depth_path)
+
+            depth_array = depth_array.astype(np.float32)
+
+            valid_mask = depth_array > 0
+            if valid_mask.any():
+                depth_min = depth_array[valid_mask].min()
+                depth_max = depth_array[valid_mask].max()
+                if depth_max > depth_min:
+                    normalized = (depth_array - depth_min) / (depth_max - depth_min)
+                else:
+                    normalized = np.zeros_like(depth_array)
+            else:
+                normalized = np.zeros_like(depth_array)
+
+            depth_uint8 = (normalized * 255).astype(np.uint8)
+            depth_img = Image.fromarray(depth_uint8, mode="L")
+
+            output_name = f"depth_{frame_idx:06d}.png" if frame_idx is not None else f"depth_{image_name.split('.')[0]}.png"
+            output_path = os.path.join(depth_output_dir, output_name)
+            depth_img.save(output_path)
+        except Exception:
+            continue
+
+    return depth_output_dir
+
+
 def execute_colmap(
     step: Colmap,
     previous_step: ExecutedStep,
@@ -362,93 +558,45 @@ def execute_colmap(
     if sampling_fps is None:
         sampling_fps = get_video_fps(input_video_path)
 
-    pc: Any = pycolmap
-
-    camera_mode = pc.CameraMode.SINGLE
+    camera_mode = pycolmap.CameraMode.SINGLE
     if step.camera_mode == "auto":
-        camera_mode = pc.CameraMode.AUTO
+        camera_mode = pycolmap.CameraMode.AUTO
 
-    device = pc.Device.auto if step.use_gpu else pc.Device.cpu
-    if (
-        hasattr(pc, "FeatureExtractionOptions")
-        and hasattr(pc, "FeatureMatchingOptions")
-        and hasattr(pc, "SequentialPairingOptions")
-    ):
-        feature_extraction_options = pc.FeatureExtractionOptions()
-        feature_extraction_options.max_image_size = step.max_image_size
-        if hasattr(feature_extraction_options, "use_gpu"):
-            feature_extraction_options.use_gpu = step.use_gpu
+    device = pycolmap.Device.auto if step.use_gpu else pycolmap.Device.cpu
+    feature_extraction_options = pycolmap.FeatureExtractionOptions()
+    feature_extraction_options.max_image_size = step.max_image_size
+    feature_extraction_options.use_gpu = step.use_gpu
 
-        pc.extract_features(
-            database_path=database_path,
-            image_path=images_dir,
-            camera_mode=camera_mode,
-            extraction_options=feature_extraction_options,
-            device=device,
-        )
-
-        sequential_pairing_options = pc.SequentialPairingOptions()
-        sequential_pairing_options.overlap = step.sequential_overlap
-        sequential_pairing_options.loop_detection = step.loop_detection
-        feature_matching_options = pc.FeatureMatchingOptions()
-        if hasattr(feature_matching_options, "use_gpu"):
-            feature_matching_options.use_gpu = step.use_gpu
-
-        pc.match_sequential(
-            database_path=database_path,
-            matching_options=feature_matching_options,
-            pairing_options=sequential_pairing_options,
-            device=device,
-        )
-    else:
-        sift_extraction_options = pc.SiftExtractionOptions()
-        sift_extraction_options.max_image_size = step.max_image_size
-        if hasattr(sift_extraction_options, "use_gpu"):
-            sift_extraction_options.use_gpu = step.use_gpu
-
-        pc.extract_features(
-            database_path=database_path,
-            image_path=images_dir,
-            camera_mode=camera_mode,
-            sift_options=sift_extraction_options,
-            device=device,
-        )
-
-        sequential_matching_options = pc.SequentialMatchingOptions()
-        sequential_matching_options.overlap = step.sequential_overlap
-        sequential_matching_options.loop_detection = step.loop_detection
-        sift_matching_options = pc.SiftMatchingOptions()
-        if hasattr(sift_matching_options, "use_gpu"):
-            sift_matching_options.use_gpu = step.use_gpu
-
-        pc.match_sequential(
-            database_path=database_path,
-            sift_options=sift_matching_options,
-            matching_options=sequential_matching_options,
-            device=device,
-        )
-
-    use_global_mapper = (
-        step.mapper == "glomap"
-        and hasattr(pc, "global_mapping")
-        and hasattr(pc, "GlobalPipelineOptions")
+    pycolmap.extract_features(
+        database_path=database_path,
+        image_path=images_dir,
+        camera_mode=camera_mode,
+        extraction_options=feature_extraction_options,
+        device=device,
     )
-    if not use_global_mapper:
-        if step.mapper == "glomap":
-            print(
-                "Requested mapper='glomap', but installed pycolmap does not expose global mapping. Falling back to incremental mapping."
-            )
 
-        incremental_options = pc.IncrementalPipelineOptions()
+    sequential_pairing_options = pycolmap.SequentialPairingOptions()
+    sequential_pairing_options.overlap = step.sequential_overlap
+    sequential_pairing_options.loop_detection = step.loop_detection
+    feature_matching_options = pycolmap.FeatureMatchingOptions()
+    feature_matching_options.use_gpu = step.use_gpu
+
+    pycolmap.match_sequential(
+        database_path=database_path,
+        matching_options=feature_matching_options,
+        pairing_options=sequential_pairing_options,
+        device=device,
+    )
+
+    if step.mapper == "colmap":
+        incremental_options = pycolmap.IncrementalPipelineOptions()
         incremental_options.min_num_matches = step.min_num_matches
         incremental_options.max_num_models = step.max_num_models
         incremental_options.min_model_size = step.min_model_size
-        if hasattr(incremental_options, "random_seed"):
-            incremental_options.random_seed = step.random_seed
-        if hasattr(incremental_options, "multiple_models"):
-            incremental_options.multiple_models = step.max_num_models > 1
+        incremental_options.random_seed = step.random_seed
+        incremental_options.multiple_models = step.max_num_models > 1
 
-        reconstructions = pc.incremental_mapping(
+        reconstructions = pycolmap.incremental_mapping(
             database_path=database_path,
             image_path=images_dir,
             output_path=sparse_dir,
@@ -466,13 +614,10 @@ def execute_colmap(
             ),
         )
     else:
-        if hasattr(pc, "calibrate_view_graph"):
-            pc.calibrate_view_graph(database_path=database_path)
-
-        global_options = pc.GlobalPipelineOptions()
+        global_options = pycolmap.GlobalPipelineOptions()
         global_options.mapper.global_positioning.use_gpu = step.use_gpu
         global_options.mapper.bundle_adjustment.ceres.use_gpu = step.use_gpu
-        reconstructions = pc.global_mapping(
+        reconstructions = pycolmap.global_mapping(
             database_path=database_path,
             image_path=images_dir,
             output_path=sparse_dir,
@@ -580,6 +725,23 @@ def execute_colmap(
     except Exception:
         mean_reprojection_error = None
 
+    depth_dir = None
+    depth_error: str | None = None
+    if step.extract_depth:
+        try:
+            depth_dir = _extract_depth_maps(
+                pycolmap=pycolmap,
+                workspace_dir=workspace_dir,
+                sparse_dir=sparse_dir,
+                best_model_dir=best_model_dir,
+                images_dir=images_dir,
+                trajectory_rows=trajectory_rows,
+                use_gpu=step.use_gpu,
+            )
+        except RuntimeError as exc:
+            depth_error = str(exc)
+            print(f"Depth extraction skipped: {depth_error}")
+
     output = {
         "input_video_path": input_video_path,
         "workspace_dir": workspace_dir,
@@ -601,6 +763,8 @@ def execute_colmap(
         },
         "cameras": [cameras[camera_id] for camera_id in sorted(cameras.keys())],
         "trajectory": trajectory_rows,
+        "depth_dir": depth_dir,
+        "depth_error": depth_error,
     }
 
     with open(output_path_abs, "w") as f:
