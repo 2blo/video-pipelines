@@ -1,8 +1,19 @@
 RIFE_IMAGE ?= video-pipelines-rife:latest
 ESRGAN_IMAGE ?= video-pipelines-esrgan:latest
+SEEDVR2_IMAGE ?= video-pipelines-seedvr2:latest
+DEPTH_ANYTHING_V2_IMAGE ?= video-pipelines-depth-anything-v2:latest
+DEPTH_CRAFTER_IMAGE ?= video-pipelines-depth-crafter:latest
+DEPTH_PRO_IMAGE ?= video-pipelines-depth-pro:latest
+NORMAL_CRAFTER_IMAGE ?= video-pipelines-normal-crafter:latest
+DKT_NORMAL_IMAGE ?= video-pipelines-dkt-normal:latest
 DOCKER_GPU_ARGS ?= --gpus all
 RIFE_MODEL_CACHE_DIR ?= .cache/rife-model
 ESRGAN_MODEL_CACHE_DIR ?= .cache/esrgan-model
+SEEDVR2_MODEL_CACHE_DIR ?= .cache/seedvr2-model
+DEPTH_CRAFTER_MODEL_CACHE_DIR ?= .cache/depth-crafter
+DEPTH_PRO_MODEL_CACHE_DIR ?= .cache/depth-pro
+NORMAL_CRAFTER_MODEL_CACHE_DIR ?= .cache/normal-crafter
+DKT_NORMAL_MODEL_CACHE_DIR ?= .cache/dkt-normal-model
 ARTIFACT_DIR ?= data
 PIPELINE_DB_PATH ?= .video_pipelines.duckdb
 
@@ -13,7 +24,7 @@ COLMAP_VERSION ?= 4.0.3
 VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 CUDA_ARCH_LIST ?= all-major
 
-.PHONY: rife-image rife-upscale rife-example esrgan-image esrgan-upscale clean-all \
+.PHONY: rife-image rife-upscale rife-example esrgan-image seedvr2-image esrgan-upscale depth-anything-v2-image depth-crafter-image depth-pro-image normal-crafter-image dkt-normal-image clean-all cli \
 	install-cudss build-ceres build-colmap build-pycolmap build-colmap-cuda build-all
 
 rife-image:
@@ -56,6 +67,24 @@ rife-example: rife-image
 
 esrgan-image:
 	docker build -t $(ESRGAN_IMAGE) -f docker/esrgan/Dockerfile .
+
+seedvr2-image:
+	docker build -t $(SEEDVR2_IMAGE) -f docker/seedvr2/Dockerfile .
+
+depth-anything-v2-image:
+	docker build -t $(DEPTH_ANYTHING_V2_IMAGE) -f docker/depth_anything_v2/Dockerfile .
+
+depth-crafter-image:
+	docker build -t $(DEPTH_CRAFTER_IMAGE) -f docker/depth_crafter/Dockerfile .
+
+depth-pro-image:
+	docker build -t $(DEPTH_PRO_IMAGE) -f docker/depth_pro/Dockerfile .
+
+normal-crafter-image:
+	docker build -t $(NORMAL_CRAFTER_IMAGE) -f docker/normal_crafter/Dockerfile .
+
+dkt-normal-image:
+	docker build -t $(DKT_NORMAL_IMAGE) -f docker/dkt_normal/Dockerfile .
 
 esrgan-upscale:
 	@if [ -z "$(INPUT)" ] || [ -z "$(WIDTH)" ] || [ -z "$(OUTPUT)" ]; then \
@@ -161,5 +190,9 @@ build-pycolmap: build-colmap
 		"$(VENV_PYTHON)" -m pip install "$(BUILD_DIR)/colmap" \
 		--config-settings=cmake.args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc;-DCUDA_ENABLED=ON;-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCH_LIST);-DCUDA_ARCHS=$(CUDA_ARCH_LIST)"
 
-make cli:
-	uv run src/pipe/cli.py
+cli:
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
+		echo "Virtualenv not found at $(VENV_PYTHON). Running uv sync once..."; \
+		uv sync; \
+	fi
+	"$(VENV_PYTHON)" src/pipe/cli.py

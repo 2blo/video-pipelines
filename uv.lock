@@ -114,6 +114,22 @@ wheels = [
 ]
 
 [[package]]
+name = "cuda-toolkit"
+version = "12.9.2.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/7e/f61db087382a2114a93abc0b38f7872f86f2c7c36839da7f9403c9044b47/cuda_toolkit-12.9.2.0-py2.py3-none-any.whl", hash = "sha256:b54b8f2fd4200090b44843d48fc5411198e8b3e47a3db56e2518ab588c0ef1e0", size = 2431, upload-time = "2026-04-14T00:40:05.972Z" },
+]
+
+[package.optional-dependencies]
+cudart = [
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+]
+curand = [
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+]
+
+[[package]]
 name = "debugpy"
 version = "1.8.16"
 source = { registry = "https://pypi.org/simple" }
@@ -492,6 +508,26 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cuda-runtime-cu12"
+version = "12.9.79"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/e0/0279bd94539fda525e0c8538db29b72a5a8495b0c12173113471d28bce78/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:83469a846206f2a733db0c42e223589ab62fd2fabac4432d2f8802de4bded0a4", size = 3515012, upload-time = "2025-06-05T20:00:35.519Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/46/a92db19b8309581092a3add7e6fceb4c301a3fd233969856a8cbf042cd3c/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3", size = 3493179, upload-time = "2025-06-05T20:00:53.735Z" },
+    { url = "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl", hash = "sha256:8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891", size = 3591604, upload-time = "2025-06-05T20:11:17.036Z" },
+]
+
+[[package]]
+name = "nvidia-curand-cu12"
+version = "10.3.10.19"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/1c/2a45afc614d99558d4a773fa740d8bb5471c8398eeed925fc0fcba020173/nvidia_curand_cu12-10.3.10.19-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:de663377feb1697e1d30ed587b07d5721fdd6d2015c738d7528a6002a6134d37", size = 68292066, upload-time = "2025-05-01T19:39:13.595Z" },
+    { url = "https://files.pythonhosted.org/packages/31/44/193a0e171750ca9f8320626e8a1f2381e4077a65e69e2fb9708bd479e34a/nvidia_curand_cu12-10.3.10.19-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:49b274db4780d421bd2ccd362e1415c13887c53c214f0d4b761752b8f9f6aa1e", size = 68295626, upload-time = "2025-05-01T19:39:38.885Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/98/1bd66fd09cbe1a5920cb36ba87029d511db7cca93979e635fd431ad3b6c0/nvidia_curand_cu12-10.3.10.19-py3-none-win_amd64.whl", hash = "sha256:e8129e6ac40dc123bd948e33d3e11b4aa617d87a583fa2f21b3210e90c743cde", size = 68774847, upload-time = "2025-05-01T19:48:52.93Z" },
+]
+
+[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -715,22 +751,17 @@ wheels = [
 ]
 
 [[package]]
-name = "pycolmap"
+name = "pycolmap-cuda12"
 version = "4.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "cuda-toolkit", extra = ["cudart", "curand"] },
     { name = "numpy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/13/8029bc25ad8fba9fa401b38bc17ce6f69ca4bccd24c6accacf9d09350575/pycolmap-4.0.3-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:c6290f1da342ae3065ea31dc0639220ce4b774db09d7c944e49be62be2f2f119", size = 19896099, upload-time = "2026-04-06T16:00:39.124Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/58/b712fcceb8b4f612c365d998ebe71d0cbc95c628a636a9b6d9059f7b41b0/pycolmap-4.0.3-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:a9c1feef2a8b0e23b0398fd862ac72b05d5057e66936e776aec39164dacc4c81", size = 27116817, upload-time = "2026-04-06T16:00:42.749Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/e3/58d1c81420bdf74ced9288cbe0931403ca6f04811477c64f1811f8a45282/pycolmap-4.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:4773de247d692a5aa744933bc3569a8a4827d903200ff83c044f83646f97a60c", size = 23385466, upload-time = "2026-04-06T16:00:47.669Z" },
-    { url = "https://files.pythonhosted.org/packages/9d/a0/e76966a400b8dc9a69a28caff23641824cae0aa8fde77d957c68b91a01f4/pycolmap-4.0.3-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:cc8f48b902d3d72c9ce8c304ceb866c77d449b07f0b8f789b3808f6d1c295d58", size = 19895906, upload-time = "2026-04-06T16:00:50.737Z" },
-    { url = "https://files.pythonhosted.org/packages/9d/cf/77025909fc86b768e7fe2bf2537bbb68622016f8f4efc38299539a125b39/pycolmap-4.0.3-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:0442df542c5e42430d14b8e62a41cd4df33966fbf2966f6058c21c7e3b2c0bd0", size = 27117259, upload-time = "2026-04-06T16:00:54.401Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/11/3962dce548ab0e7b9e4d908905a284e9253d16b3ae26ed7dac927d11cd70/pycolmap-4.0.3-cp313-cp313-win_amd64.whl", hash = "sha256:9fc3627da78516cae6b49457623303664783f5a2d59fe9a5e7a762d59499f4b4", size = 23385888, upload-time = "2026-04-06T16:00:57.907Z" },
-    { url = "https://files.pythonhosted.org/packages/cb/24/e585ed19291b753c27542517c249f1cab0b80fc224686cc8e5a566dcbfa7/pycolmap-4.0.3-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:4312ef6285b731418b44b3f704f2a8f6bf087ab7c395643645bef2e1eb9a9128", size = 19907845, upload-time = "2026-04-06T16:01:00.949Z" },
-    { url = "https://files.pythonhosted.org/packages/21/f9/6ce404a001a75a3cb5fa0298174d140fffba3167bce974e6c1f95c586505/pycolmap-4.0.3-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:6b059827b6ae5afa64aa4ac6f8983c30859e306df5f6ead97fbbc86e9985dde9", size = 27121846, upload-time = "2026-04-06T16:01:04.632Z" },
-    { url = "https://files.pythonhosted.org/packages/92/44/6e2e7e776135259c238bb53d7a43a9cb82d13ec1c482924aafa9ee5b0929/pycolmap-4.0.3-cp314-cp314-win_amd64.whl", hash = "sha256:7950529e85084f20de2108357ad0ebcdb667a476412d25b4476462e7bbde3d25", size = 24102584, upload-time = "2026-04-06T16:01:08.253Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/9a/e93f59bde40572884897ca647d98cf2a0b162288f809de2019279c1db947/pycolmap_cuda12-4.0.3-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6a3b8572f9629a29a513f0a9e150a9425fdc43f6cf3b4ea9cef71c29f271a6e5", size = 61730173, upload-time = "2026-04-06T16:01:25.948Z" },
+    { url = "https://files.pythonhosted.org/packages/20/c4/22ef2fc883b44edf5b25eb1066ccede678d6d261d758b2d8fb59cc912b32/pycolmap_cuda12-4.0.3-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:415cc12936a8d06ba70a4be9ff9e9a3b28ef357516fb4da532b5df83a9f5dd71", size = 61732020, upload-time = "2026-04-06T16:01:31.573Z" },
+    { url = "https://files.pythonhosted.org/packages/82/4a/80880529304d2c05799e77538d8a2722d5ef8e747c1f5883e4588ccfd7d9/pycolmap_cuda12-4.0.3-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:30621f53f18b53bf9ee08d783362c47ade7d6cdde9f27d440ff1b20d12b0d3bf", size = 61767829, upload-time = "2026-04-06T16:01:37.002Z" },
 ]
 
 [[package]]
@@ -1077,7 +1108,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pillow" },
-    { name = "pycolmap" },
+    { name = "pycolmap-cuda12" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "typer" },
@@ -1106,7 +1137,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "pillow", specifier = ">=10.0.0" },
-    { name = "pycolmap", specifier = ">=0.6.1" },
+    { name = "pycolmap-cuda12", specifier = ">=4.0.3" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "typer", specifier = ">=0.16.0" },

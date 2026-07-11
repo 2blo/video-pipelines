@@ -17,9 +17,71 @@ job:
               start: 00:00:02
               end: 00:00:04
         - type: upscale
-          width: 2160
+          variant:
+            type: esrgan
+            width: 2160
         - type: interpolate
           fps: 240
+
+    4k_seedvr2:
+      metadata: {}
+      input:
+        link: {{pipelines["4k_seedvr2"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:02
+              end: 00:00:04
+        - type: upscale
+          variant:
+            type: seedvr2
+            width: 3840
+            model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
+            batch_size: 5
+            temporal_overlap: 3
+            max_resolution: 2160
+            blocks_to_swap: 16
+            swap_io_components: true
+            dit_offload_device: cpu
+            vae_offload_device: cpu
+            tensor_offload_device: cpu
+            vae_encode_tiled: true
+            vae_decode_tiled: true
+            vae_encode_tile_size: 1024
+            vae_encode_tile_overlap: 128
+            vae_decode_tile_size: 1024
+            vae_decode_tile_overlap: 128
+            cache_dit: true
+            cache_vae: true
+
+    4k_seedv3_full:
+      metadata: {}
+      input:
+        link: {{pipelines["4k_seedv3_full"].input.link}}
+      steps:
+        - type: upscale
+          variant:
+            # "seedv3" requested; current integrated backend is SeedVR2.
+            type: seedvr2
+            width: 3840
+            model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
+            batch_size: 5
+            temporal_overlap: 3
+            max_resolution: 2160
+            blocks_to_swap: 16
+            swap_io_components: true
+            dit_offload_device: cpu
+            vae_offload_device: cpu
+            tensor_offload_device: cpu
+            vae_encode_tiled: true
+            vae_decode_tiled: true
+            vae_encode_tile_size: 1024
+            vae_encode_tile_overlap: 128
+            vae_decode_tile_size: 1024
+            vae_decode_tile_overlap: 128
+            cache_dit: true
+            cache_vae: true
 
     colmap_camera_path:
       metadata: {}

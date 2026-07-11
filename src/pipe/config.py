@@ -40,7 +40,40 @@ class Interpolate(BaseModel):
 
 class Upscale(BaseModel):
     type: Literal["upscale"]
+    variant: "UpscaleVariant"
+
+
+class EsrganUpscaleVariant(BaseModel):
+    type: Literal["esrgan"]
     width: int
+
+
+class SeedVR2UpscaleVariant(BaseModel):
+    type: Literal["seedvr2"]
+    width: int
+    model: str = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
+    batch_size: int = 5
+    temporal_overlap: int = 3
+    max_resolution: int = 2160
+    blocks_to_swap: int = 16
+    swap_io_components: bool = True
+    dit_offload_device: Literal["none", "cpu"] = "cpu"
+    vae_offload_device: Literal["none", "cpu"] = "cpu"
+    tensor_offload_device: Literal["none", "cpu"] = "cpu"
+    vae_encode_tiled: bool = True
+    vae_decode_tiled: bool = True
+    vae_encode_tile_size: int = 1024
+    vae_encode_tile_overlap: int = 128
+    vae_decode_tile_size: int = 1024
+    vae_decode_tile_overlap: int = 128
+    cache_dit: bool = True
+    cache_vae: bool = True
+
+
+UpscaleVariant = Annotated[
+    EsrganUpscaleVariant | SeedVR2UpscaleVariant,
+    Field(discriminator="type"),
+]
 
 
 class Colmap(BaseModel):
@@ -61,6 +94,75 @@ class Colmap(BaseModel):
     extract_depth: bool = False
 
 
+class DepthAnythingV2(BaseModel):
+    type: Literal["depth_anything_v2"]
+    encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
+    input_size: int = 518
+
+
+class DepthAnythingV2Variant(BaseModel):
+    type: Literal["depth_anything_v2"]
+    encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
+    input_size: int = 518
+
+
+class DepthCrafterVariant(BaseModel):
+    type: Literal["depth_crafter"]
+    max_res: int | None = None
+    process_length: int | None = None
+    target_fps: int | None = None
+
+
+class DepthProVariant(BaseModel):
+    type: Literal["depth_pro"]
+    precision: Literal["fp16", "fp32"] = "fp16"
+
+
+DepthVariant = Annotated[
+    DepthAnythingV2Variant | DepthCrafterVariant | DepthProVariant,
+    Field(discriminator="type"),
+]
+
+
+class Depth(BaseModel):
+    type: Literal["depth"]
+    variant: DepthVariant
+
+
+class NormalCrafterVariant(BaseModel):
+    type: Literal["normal_crafter"]
+    cpu_offload: Literal["model", "sequential"] = "model"
+    unet_path: str = "Yanrui95/NormalCrafter"
+    pre_train_path: str = "stabilityai/stable-video-diffusion-img2vid-xt"
+    max_res: int | None = None
+    process_length: int | None = None
+    target_fps: int | None = None
+    window_size: int = 14
+    time_step_size: int = 10
+    decode_chunk_size: int = 7
+
+
+class DktNormalsVariant(BaseModel):
+    type: Literal["dkt"]
+    model_id: str = "Daniellesry/DKT-Normal-14B"
+    height: int = 480
+    width: int = 832
+    num_inference_steps: int = 3
+    window_size: int = 6
+    overlap: int = 1
+
+
+NormalsVariant = Annotated[
+    NormalCrafterVariant | DktNormalsVariant,
+    Field(discriminator="type"),
+]
+
+
+class Normals(BaseModel):
+    type: Literal["normals"]
+    variant: NormalsVariant
+
+
 class CopyTracks(BaseModel):
     type: Literal["copy_tracks"]
     source_path: str
@@ -74,7 +176,10 @@ class Ffmpeg(BaseModel):
     operations: List[FfmpegOperation]
 
 
-Step = Annotated[Ffmpeg | Interpolate | Upscale | Colmap, Field(discriminator="type")]
+Step = Annotated[
+    Ffmpeg | Interpolate | Upscale | Colmap | DepthAnythingV2 | Depth | Normals,
+    Field(discriminator="type"),
+]
 
 
 class Pipeline(BaseModel):

@@ -31,3 +31,93 @@ job:
           random_seed: 0
           use_gpu: true
           extract_depth: true
+    nier_depth_anything_v2:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: depth
+          variant:
+            type: depth_anything_v2
+            encoder: vitl
+            input_size: 518
+    nier_depth_crafter:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: depth
+          variant:
+            type: depth_crafter
+            # max_res: 1024
+            max_res: 1920
+    nier_depth_pro:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: depth
+          variant:
+            type: depth_pro
+            precision: fp16
+    nier_seedv3_full:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: upscale
+          variant:
+            # "seedv3" requested; current integrated backend is SeedVR2.
+            type: seedvr2
+            width: 3840
+            model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
+            batch_size: 5
+            temporal_overlap: 3
+            max_resolution: 2160
+            blocks_to_swap: 16
+            swap_io_components: true
+            dit_offload_device: cpu
+            vae_offload_device: cpu
+            tensor_offload_device: cpu
+            vae_encode_tiled: true
+            vae_decode_tiled: true
+            vae_encode_tile_size: 1024
+            vae_encode_tile_overlap: 128
+            vae_decode_tile_size: 1024
+            vae_decode_tile_overlap: 128
+            cache_dit: true
+            cache_vae: true
+    nier_normals_crafter:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: normals
+          variant:
+            type: normal_crafter
+            max_res: 1920
+            process_length: -1
+            target_fps: -1
+            window_size: 14
+            time_step_size: 10
+            decode_chunk_size: 7

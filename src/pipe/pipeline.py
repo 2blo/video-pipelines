@@ -13,19 +13,25 @@ from pipe.chart import Chart
 from pipe.config import (
     Colmap,
     Config,
+    Depth,
+    DepthAnythingV2,
     Episode,
     Ffmpeg,
     Interpolate,
     ManualDownload,
+    Normals,
     Path,
     Upscale,
 )
 from pipe.ops import (
     ExecutedStep,
     execute_colmap,
+    execute_depth,
+    execute_depth_anything_v2,
     execute_ffmpeg,
     execute_interpolate,
     execute_manual_download,
+    execute_normals,
     get_ffmpeg_step_extension,
     execute_upscale,
 )
@@ -226,6 +232,8 @@ class StepEventLogger:
                     step_json VARCHAR,
                     error_message VARCHAR
                 ),
+                step_start_timestamp TIMESTAMP,
+                step_end_timestamp TIMESTAMP,
                 file STRUCT(
                     path VARCHAR,
                     extension VARCHAR,
@@ -240,6 +248,12 @@ class StepEventLogger:
                 raw_media_metadata TEXT
             )
             """
+        )
+        self._conn.execute(
+            f"ALTER TABLE {STEP_EVENTS_TABLE} ADD COLUMN IF NOT EXISTS step_start_timestamp TIMESTAMP"
+        )
+        self._conn.execute(
+            f"ALTER TABLE {STEP_EVENTS_TABLE} ADD COLUMN IF NOT EXISTS step_end_timestamp TIMESTAMP"
         )
 
     def log_step_event(
@@ -263,6 +277,8 @@ class StepEventLogger:
         step_type: str,
         step_json: str,
         step_event: StepEventType,
+        step_start_timestamp: datetime | None,
+        step_end_timestamp: datetime | None,
         job_start_timestamp: datetime,
         file_info: MediaFileInfo,
         error_message: str | None,
@@ -274,6 +290,8 @@ class StepEventLogger:
                 job,
                 pipeline,
                 step,
+                step_start_timestamp,
+                step_end_timestamp,
                 file,
                 raw_media_metadata
             )
@@ -304,6 +322,8 @@ class StepEventLogger:
                     step_json := ?,
                     error_message := ?
                 ),
+                ?,
+                ?,
                 struct_pack(
                     path := ?,
                     extension := ?,
@@ -338,6 +358,8 @@ class StepEventLogger:
                 step_event,
                 step_json,
                 error_message,
+                step_start_timestamp,
+                step_end_timestamp,
                 file_info.path,
                 file_info.extension,
                 file_info.size_bytes,
@@ -490,7 +512,7 @@ def run_config(
                     output_extension = get_ffmpeg_step_extension(
                         step, previous_step.extension
                     )
-                elif isinstance(step, Colmap):
+                elif isinstance(step, Colmap | DepthAnythingV2 | Depth | Normals):
                     output_extension = ".json"
                 else:
                     output_extension = previous_step.extension
@@ -531,6 +553,8 @@ def run_config(
                     step_type=step_type,
                     step_json=step_json,
                     step_event="start",
+                    step_start_timestamp=start_ts,
+                    step_end_timestamp=None,
                     job_start_timestamp=job_start_timestamp,
                     file_info=start_file_info,
                     error_message=None,
@@ -576,6 +600,8 @@ def run_config(
                             step_type=step_type,
                             step_json=step_json,
                             step_event="skipped",
+                            step_start_timestamp=start_ts,
+                            step_end_timestamp=skip_ts,
                             job_start_timestamp=job_start_timestamp,
                             file_info=existing_file_info,
                             error_message=None,
@@ -611,6 +637,24 @@ def run_config(
                             previous_step=previous_step,
                             output_path=intended_output,
                         )
+                    elif isinstance(step, DepthAnythingV2):
+                        previous_step = execute_depth_anything_v2(
+                            step=step,
+                            previous_step=previous_step,
+                            output_path=intended_output,
+                        )
+                    elif isinstance(step, Depth):
+                        previous_step = execute_depth(
+                            step=step,
+                            previous_step=previous_step,
+                            output_path=intended_output,
+                        )
+                    elif isinstance(step, Normals):
+                        previous_step = execute_normals(
+                            step=step,
+                            previous_step=previous_step,
+                            output_path=intended_output,
+                        )
                     else:
                         raise ValueError(f"Unsupported step type: {step_type}")
                 except Exception as exc:
@@ -637,6 +681,8 @@ def run_config(
                         step_type=step_type,
                         step_json=step_json,
                         step_event="failed",
+                        step_start_timestamp=start_ts,
+                        step_end_timestamp=failed_ts,
                         job_start_timestamp=job_start_timestamp,
                         file_info=failed_file_info,
                         error_message=str(exc),
@@ -671,6 +717,8 @@ def run_config(
                     step_type=step_type,
                     step_json=step_json,
                     step_event="completed",
+                    step_start_timestamp=start_ts,
+                    step_end_timestamp=completed_ts,
                     job_start_timestamp=job_start_timestamp,
                     file_info=completed_file_info,
                     error_message=None,

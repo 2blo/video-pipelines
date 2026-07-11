@@ -10,11 +10,21 @@ from typing import Any, Dict, List
 
 from pipe.config import (
     Colmap,
+    Depth,
+    DepthCrafterVariant,
+    DepthProVariant,
     CopyTracks,
+    DktNormalsVariant,
+    DepthAnythingV2,
+    DepthAnythingV2Variant,
     Encode,
+    EsrganUpscaleVariant,
     Ffmpeg,
     Interpolate,
     ManualDownload,
+    NormalCrafterVariant,
+    Normals,
+    SeedVR2UpscaleVariant,
     Trim,
     Upscale,
 )
@@ -95,24 +105,62 @@ def execute_manual_download(
     step: ManualDownload, windows_downloads_dir: str, output_path_without_extension: str
 ) -> ExecutedStep:
     files_before = set(os.listdir(windows_downloads_dir))
-    webbrowser.open(step.link)
+    files_before_meta: Dict[str, tuple[int, int]] = {}
+    for fname in files_before:
+        full = os.path.join(windows_downloads_dir, fname)
+        try:
+            stat = os.stat(full)
+        except OSError:
+            continue
+        files_before_meta[fname] = (stat.st_size, stat.st_mtime_ns)
+    # Browser launch is opt-in; many WSL/headless environments have DISPLAY but no working URL opener.
+    auto_open_links = os.environ.get("VIDEO_PIPELINES_AUTO_OPEN_LINKS", "0") == "1"
+    has_desktop = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    opened = False
+    if auto_open_links and has_desktop:
+        try:
+            opened = webbrowser.open(step.link)
+        except Exception:
+            opened = False
+
+    if not opened:
+        print("Could not auto-open browser. Download manually from:")
+        print(step.link)
+        print(f"Waiting for new or updated file in: {windows_downloads_dir}")
 
     prev_sizes: Dict[str, int] = {}
     stable_counts: Dict[str, int] = {}
     detected_any = False
+    temp_suffixes = {".crdownload", ".part", ".tmp", ".download"}
 
     while True:
         files_after = set(os.listdir(windows_downloads_dir))
-        new_files = files_after - files_before
+        changed_files: List[str] = []
 
-        if not new_files:
+        for fname in files_after:
+            full = os.path.join(windows_downloads_dir, fname)
+            extension = os.path.splitext(fname)[1].lower()
+            if extension in temp_suffixes:
+                continue
+
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+
+            current_meta = (stat.st_size, stat.st_mtime_ns)
+            previous_meta = files_before_meta.get(fname)
+            if previous_meta is None or previous_meta != current_meta:
+                changed_files.append(fname)
+
+        if not changed_files:
             sleep(0.5)
             continue
 
         detected_any = True
 
         current_sizes = {}
-        for fname in list(new_files):
+        for fname in changed_files:
             full = os.path.join(windows_downloads_dir, fname)
             try:
                 current_sizes[fname] = os.path.getsize(full)
@@ -142,12 +190,10 @@ def execute_manual_download(
 
         if (
             detected_any
-            and new_files
-            and all(f in stable_now for f in new_files if f in current_sizes)
+            and changed_files
+            and all(f in stable_now for f in changed_files if f in current_sizes)
         ):
-            candidates = [
-                f for f in new_files if f in current_sizes and f in stable_now
-            ]
+            candidates = [f for f in changed_files if f in current_sizes and f in stable_now]
             if not candidates:
                 sleep(0.5)
                 continue
@@ -492,7 +538,11 @@ def _extract_depth_maps(
             depth_uint8 = (normalized * 255).astype(np.uint8)
             depth_img = Image.fromarray(depth_uint8, mode="L")
 
-            output_name = f"depth_{frame_idx:06d}.png" if frame_idx is not None else f"depth_{image_name.split('.')[0]}.png"
+            output_name = (
+                f"depth_{frame_idx:06d}.png"
+                if frame_idx is not None
+                else f"depth_{image_name.split('.')[0]}.png"
+            )
             output_path = os.path.join(depth_output_dir, output_name)
             depth_img.save(output_path)
         except Exception:
@@ -773,6 +823,837 @@ def execute_colmap(
     return ExecutedStep(output_path=output_path_abs, extension=".json")
 
 
+def depth_anything_v2(
+    input_path: str,
+    output_path: str,
+    encoder: str,
+    input_size: int,
+) -> None:
+    if input_size <= 0:
+        raise ValueError(
+            f"Invalid input_size={input_size}. input_size must be a positive integer."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    depth_workspace_dir = os.path.join(output_dir, f"{output_stem}_depth_anything_v2")
+    depth_workspace_name = os.path.basename(depth_workspace_dir)
+    depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
+    preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
+
+    depth_image = os.environ.get(
+        "DEPTH_ANYTHING_V2_IMAGE", "video-pipelines-depth-anything-v2:latest"
+    )
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("DEPTH_ANYTHING_V2_MODEL_CACHE_DIR", ".cache/depth-anything-v2")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", depth_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "Depth Anything V2 docker image is not available locally: "
+            f"{depth_image}\n\n"
+            "Build it first with: make depth-anything-v2-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/depth-anything-v2/checkpoints",
+        depth_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        f"/io/out/{depth_workspace_name}",
+        encoder,
+        str(input_size),
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "Depth Anything V2 docker inference failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    depth_pngs = (
+        [name for name in os.listdir(depth_maps_dir) if name.lower().endswith(".png")]
+        if os.path.isdir(depth_maps_dir)
+        else []
+    )
+
+    if not depth_pngs:
+        raise RuntimeError(
+            "Depth Anything V2 completed but produced no depth PNG files at "
+            f"{depth_maps_dir}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "encoder": encoder,
+        "input_size": input_size,
+        "depth_workspace_dir": depth_workspace_dir,
+        "depth_maps_dir": depth_maps_dir,
+        "depth_preview_video_path": preview_video_path,
+        "num_depth_maps": len(depth_pngs),
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
+def execute_depth_anything_v2(
+    step: DepthAnythingV2,
+    previous_step: ExecutedStep,
+    output_path: str,
+) -> ExecutedStep:
+    depth_anything_v2(
+        input_path=previous_step.output_path,
+        output_path=output_path,
+        encoder=step.encoder,
+        input_size=step.input_size,
+    )
+    return ExecutedStep(output_path=output_path, extension=".json")
+
+
+def depth_crafter(
+    input_path: str,
+    output_path: str,
+    max_res: int | None,
+    process_length: int | None,
+    target_fps: int | None,
+) -> None:
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    if max_res is None or process_length is None or target_fps is None:
+        probe_command: List[str] = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate,nb_frames",
+            "-of",
+            "json",
+            input_abs,
+        ]
+        try:
+            probe_result = subprocess.run(
+                probe_command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            probe_json = json.loads(probe_result.stdout)
+            streams = probe_json["streams"]
+            if not streams:
+                raise ValueError("No video stream found in input file.")
+            stream = streams[0]
+
+            if max_res is None:
+                width = int(stream["width"])
+                height = int(stream["height"])
+                max_res = max(width, height)
+
+            if target_fps is None:
+                avg_frame_rate = str(stream["avg_frame_rate"])
+                if avg_frame_rate == "0/0":
+                    raise ValueError("avg_frame_rate is 0/0.")
+                numerator, denominator = avg_frame_rate.split("/", 1)
+                fps = float(numerator) / float(denominator)
+                target_fps = max(1, int(round(fps)))
+
+            if process_length is None:
+                nb_frames = stream.get("nb_frames")
+                process_length = int(nb_frames) if nb_frames not in [None, "N/A"] else -1
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to derive DepthCrafter defaults from input footage. "
+                "Provide max_res/target_fps/process_length explicitly or ensure ffprobe metadata is available."
+            ) from exc
+
+    if max_res <= 0:
+        raise ValueError(
+            f"Invalid max_res={max_res}. max_res must be a positive integer."
+        )
+
+    if target_fps <= 0:
+        raise ValueError(
+            f"Invalid target_fps={target_fps}. target_fps must be a positive integer."
+        )
+
+    if process_length == 0 or process_length < -1:
+        raise ValueError(
+            f"Invalid process_length={process_length}. Use -1 for full clip length or a positive integer."
+        )
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    depth_workspace_dir = os.path.join(output_dir, f"{output_stem}_depth_crafter")
+    depth_workspace_name = os.path.basename(depth_workspace_dir)
+
+    input_stem = os.path.splitext(os.path.basename(input_abs))[0]
+    depth_npz_path = os.path.join(depth_workspace_dir, f"{input_stem}.npz")
+    preview_video_path = os.path.join(depth_workspace_dir, f"{input_stem}_vis.mp4")
+
+    depth_image = os.environ.get(
+        "DEPTH_CRAFTER_IMAGE", "video-pipelines-depth-crafter:latest"
+    )
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("DEPTH_CRAFTER_MODEL_CACHE_DIR", ".cache/depth-crafter")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", depth_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "DepthCrafter docker image is not available locally: "
+            f"{depth_image}\n\n"
+            "Build it first with: make depth-crafter-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/root/.cache/huggingface",
+        depth_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        f"/io/out/{depth_workspace_name}",
+        str(max_res),
+        str(process_length),
+        str(target_fps),
+    ]
+
+    print(f"Running DepthCrafter docker command: {shlex.join(command)}")
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "DepthCrafter docker inference failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    if not os.path.exists(depth_npz_path):
+        raise RuntimeError(
+            f"DepthCrafter completed but produced no depth NPZ file at {depth_npz_path}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "max_res": max_res,
+        "process_length": process_length,
+        "target_fps": target_fps,
+        "depth_workspace_dir": depth_workspace_dir,
+        "depth_npz_path": depth_npz_path,
+        "depth_preview_video_path": preview_video_path,
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
+def depth_pro(
+    input_path: str,
+    output_path: str,
+    precision: str,
+) -> None:
+    if precision not in ["fp16", "fp32"]:
+        raise ValueError(
+            f"Unsupported precision={precision}. Use one of: fp16, fp32."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    depth_workspace_dir = os.path.join(output_dir, f"{output_stem}_depth_pro")
+    depth_workspace_name = os.path.basename(depth_workspace_dir)
+    depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
+    preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
+    metrics_npz_dir = os.path.join(depth_workspace_dir, "depth_npz")
+
+    depth_image = os.environ.get("DEPTH_PRO_IMAGE", "video-pipelines-depth-pro:latest")
+    docker_gpu_args_env = os.environ.get("DOCKER_GPU_ARGS")
+    if docker_gpu_args_env is not None:
+        docker_gpu_args = shlex.split(docker_gpu_args_env)
+    else:
+        nvidia_smi_check = subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        docker_gpu_args = ["--gpus", "all"] if nvidia_smi_check.returncode == 0 else []
+    model_cache_dir = os.path.abspath(
+        os.environ.get("DEPTH_PRO_MODEL_CACHE_DIR", ".cache/depth-pro")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", depth_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "Depth Pro docker image is not available locally: "
+            f"{depth_image}\n\n"
+            "Build it first with: make depth-pro-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/ml-depth-pro/checkpoints",
+        depth_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        f"/io/out/{depth_workspace_name}",
+        precision,
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "Depth Pro docker inference failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    depth_pngs = (
+        [name for name in os.listdir(depth_maps_dir) if name.lower().endswith(".png")]
+        if os.path.isdir(depth_maps_dir)
+        else []
+    )
+    depth_npzs = (
+        [name for name in os.listdir(metrics_npz_dir) if name.lower().endswith(".npz")]
+        if os.path.isdir(metrics_npz_dir)
+        else []
+    )
+
+    if not depth_pngs:
+        raise RuntimeError(
+            "Depth Pro completed but produced no depth PNG files at "
+            f"{depth_maps_dir}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "precision": precision,
+        "depth_workspace_dir": depth_workspace_dir,
+        "depth_maps_dir": depth_maps_dir,
+        "depth_npz_dir": metrics_npz_dir,
+        "depth_preview_video_path": preview_video_path,
+        "num_depth_maps": len(depth_pngs),
+        "num_depth_npz": len(depth_npzs),
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
+def execute_depth(
+    step: Depth,
+    previous_step: ExecutedStep,
+    output_path: str,
+) -> ExecutedStep:
+    variant = step.variant
+    if isinstance(variant, DepthAnythingV2Variant):
+        depth_anything_v2(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            encoder=variant.encoder,
+            input_size=variant.input_size,
+        )
+    elif isinstance(variant, DepthCrafterVariant):
+        depth_crafter(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            max_res=variant.max_res,
+            process_length=variant.process_length,
+            target_fps=variant.target_fps,
+        )
+    elif isinstance(variant, DepthProVariant):
+        depth_pro(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            precision=variant.precision,
+        )
+    else:
+        raise ValueError(f"Unsupported depth variant: {variant.type}")
+
+    return ExecutedStep(output_path=output_path, extension=".json")
+
+
+def normal_crafter(
+    input_path: str,
+    output_path: str,
+    cpu_offload: str,
+    unet_path: str,
+    pre_train_path: str,
+    max_res: int | None,
+    process_length: int | None,
+    target_fps: int | None,
+    window_size: int,
+    time_step_size: int,
+    decode_chunk_size: int,
+) -> None:
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    if max_res is None or process_length is None or target_fps is None:
+        probe_command: List[str] = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate,nb_frames",
+            "-of",
+            "json",
+            input_abs,
+        ]
+        try:
+            probe_result = subprocess.run(
+                probe_command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            probe_json = json.loads(probe_result.stdout)
+            streams = probe_json["streams"]
+            if not streams:
+                raise ValueError("No video stream found in input file.")
+            stream = streams[0]
+
+            if max_res is None:
+                width = int(stream["width"])
+                height = int(stream["height"])
+                max_res = max(width, height)
+
+            if target_fps is None:
+                avg_frame_rate = str(stream["avg_frame_rate"])
+                if avg_frame_rate == "0/0":
+                    raise ValueError("avg_frame_rate is 0/0.")
+                numerator, denominator = avg_frame_rate.split("/", 1)
+                fps = float(numerator) / float(denominator)
+                target_fps = max(1, int(round(fps)))
+
+            if process_length is None:
+                nb_frames = stream.get("nb_frames")
+                process_length = (
+                    int(nb_frames) if nb_frames not in [None, "N/A"] else -1
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to derive NormalCrafter defaults from input footage. "
+                "Provide max_res/target_fps/process_length explicitly or ensure ffprobe metadata is available."
+            ) from exc
+
+    if max_res <= 0:
+        raise ValueError(
+            f"Invalid max_res={max_res}. max_res must be a positive integer."
+        )
+
+    if target_fps <= 0:
+        raise ValueError(
+            f"Invalid target_fps={target_fps}. target_fps must be a positive integer."
+        )
+
+    if process_length == 0 or process_length < -1:
+        raise ValueError(
+            f"Invalid process_length={process_length}. Use -1 for full clip length or a positive integer."
+        )
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    normals_workspace_dir = os.path.join(output_dir, f"{output_stem}_normal_crafter")
+    normals_workspace_name = os.path.basename(normals_workspace_dir)
+
+    input_stem = os.path.splitext(os.path.basename(input_abs))[0]
+    normals_npz_path = os.path.join(normals_workspace_dir, f"{input_stem}.npz")
+    preview_video_path = os.path.join(normals_workspace_dir, f"{input_stem}_vis.mp4")
+
+    normals_image = os.environ.get(
+        "NORMAL_CRAFTER_IMAGE", "video-pipelines-normal-crafter:latest"
+    )
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("NORMAL_CRAFTER_MODEL_CACHE_DIR", ".cache/normal-crafter")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", normals_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "NormalCrafter docker image is not available locally: "
+            f"{normals_image}\n\n"
+            "Build it first with: make normal-crafter-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "--entrypoint",
+        "python3",
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/root/.cache/huggingface",
+        normals_image,
+        "/opt/NormalCrafter/run.py",
+        "--video-path",
+        f"/io/in/{os.path.basename(input_abs)}",
+        "--save-folder",
+        f"/io/out/{normals_workspace_name}",
+        "--unet-path",
+        unet_path,
+        "--pre-train-path",
+        pre_train_path,
+        "--cpu-offload",
+        cpu_offload,
+        "--max-res",
+        str(max_res),
+        "--process-length",
+        str(process_length),
+        "--target-fps",
+        str(target_fps),
+        "--window-size",
+        str(window_size),
+        "--time-step-size",
+        str(time_step_size),
+        "--save-npz=True",
+    ]
+
+    help_command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "--entrypoint",
+        "python3",
+        normals_image,
+        "/opt/NormalCrafter/run.py",
+        "--help",
+    ]
+    decode_chunk_supported = False
+    try:
+        help_result = subprocess.run(
+            help_command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        decode_chunk_supported = "--decode-chunk-size" in (
+            (help_result.stdout or "") + (help_result.stderr or "")
+        )
+    except subprocess.CalledProcessError:
+        decode_chunk_supported = False
+
+    if decode_chunk_supported:
+        command.extend(["--decode-chunk-size", str(decode_chunk_size)])
+    else:
+        print(
+            "NormalCrafter run.py does not support --decode-chunk-size; "
+            "continuing without it."
+        )
+
+    print(f"Running NormalCrafter docker command: {shlex.join(command)}")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        output_tail: List[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            output_tail.append(line.rstrip("\n"))
+            if len(output_tail) > 120:
+                output_tail.pop(0)
+
+        exit_code = process.wait()
+        if exit_code == 0:
+            output_tail = []
+        if exit_code != 0:
+            details: List[str] = [
+                "NormalCrafter docker inference failed.",
+                f"Exit code: {exit_code}",
+                f"Command: {shlex.join(command)}",
+            ]
+            if exit_code == 137:
+                details.append(
+                    "Likely cause: process was killed due to memory pressure (OOM). "
+                    "Try lowering NormalCrafter settings: max_res, target_fps, "
+                    "window_size, time_step_size, or keep decode_chunk_size at 1."
+                )
+            if output_tail:
+                details.append("output (tail):\n" + "\n".join(output_tail))
+            raise RuntimeError("\n\n".join(details))
+    except OSError as exc:
+        os_error_details: List[str] = [
+            "NormalCrafter docker inference failed.",
+            f"OSError: {exc}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(os_error_details)) from exc
+
+    if not os.path.exists(normals_npz_path):
+        raise RuntimeError(
+            "NormalCrafter completed but produced no normals NPZ file at "
+            f"{normals_npz_path}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "cpu_offload": cpu_offload,
+        "unet_path": unet_path,
+        "pre_train_path": pre_train_path,
+        "max_res": max_res,
+        "process_length": process_length,
+        "target_fps": target_fps,
+        "window_size": window_size,
+        "time_step_size": time_step_size,
+        "decode_chunk_size": decode_chunk_size,
+        "normals_workspace_dir": normals_workspace_dir,
+        "normals_npz_path": normals_npz_path,
+        "normals_preview_video_path": preview_video_path,
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
+def execute_normals(
+    step: Normals,
+    previous_step: ExecutedStep,
+    output_path: str,
+) -> ExecutedStep:
+    variant = step.variant
+    if isinstance(variant, NormalCrafterVariant):
+        normal_crafter(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            cpu_offload=variant.cpu_offload,
+            unet_path=variant.unet_path,
+            pre_train_path=variant.pre_train_path,
+            max_res=variant.max_res,
+            process_length=variant.process_length,
+            target_fps=variant.target_fps,
+            window_size=variant.window_size,
+            time_step_size=variant.time_step_size,
+            decode_chunk_size=variant.decode_chunk_size,
+        )
+    elif isinstance(variant, DktNormalsVariant):
+        dkt_normals(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            model_id=variant.model_id,
+            height=variant.height,
+            width=variant.width,
+            num_inference_steps=variant.num_inference_steps,
+            window_size=variant.window_size,
+            overlap=variant.overlap,
+        )
+    else:
+        raise ValueError(f"Unsupported normals variant: {variant.type}")
+
+    return ExecutedStep(output_path=output_path, extension=".json")
+
+
+def dkt_normals(
+    input_path: str,
+    output_path: str,
+    model_id: str,
+    height: int,
+    width: int,
+    num_inference_steps: int,
+    window_size: int,
+    overlap: int,
+) -> None:
+    if height <= 0 or width <= 0:
+        raise ValueError(
+            f"Invalid size ({height}x{width}). Height and width must be positive integers."
+        )
+    if num_inference_steps <= 0:
+        raise ValueError(
+            f"Invalid num_inference_steps={num_inference_steps}. Must be a positive integer."
+        )
+    if window_size <= 0:
+        raise ValueError(
+            f"Invalid window_size={window_size}. Must be a positive integer."
+        )
+    if overlap < 0:
+        raise ValueError(f"Invalid overlap={overlap}. Must be non-negative.")
+    if overlap >= window_size:
+        raise ValueError(
+            f"Invalid overlap={overlap}. overlap must be less than window_size={window_size}."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    normals_workspace_dir = os.path.join(output_dir, f"{output_stem}_dkt")
+    normals_workspace_name = os.path.basename(normals_workspace_dir)
+
+    input_stem = os.path.splitext(os.path.basename(input_abs))[0]
+    normals_npz_path = os.path.join(normals_workspace_dir, f"{input_stem}.npz")
+    preview_video_path = os.path.join(normals_workspace_dir, f"{input_stem}_vis.mp4")
+
+    dkt_image = os.environ.get("DKT_NORMAL_IMAGE", "video-pipelines-dkt-normal:latest")
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("DKT_NORMAL_MODEL_CACHE_DIR", ".cache/dkt-normal-model")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", dkt_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "DKT docker image is not available locally: "
+            f"{dkt_image}\n\n"
+            "Build it first with: make dkt-normal-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/DKT/checkpoints",
+        dkt_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        f"/io/out/{normals_workspace_name}",
+        model_id,
+        str(height),
+        str(width),
+        str(num_inference_steps),
+        str(window_size),
+        str(overlap),
+    ]
+    print(f"Running DKT normals docker command: {shlex.join(command)}")
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "DKT normals docker inference failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    if not os.path.exists(normals_npz_path):
+        raise RuntimeError(
+            f"DKT normals completed but produced no NPZ file at {normals_npz_path}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "model_id": model_id,
+        "height": height,
+        "width": width,
+        "num_inference_steps": num_inference_steps,
+        "window_size": window_size,
+        "overlap": overlap,
+        "normals_workspace_dir": normals_workspace_dir,
+        "normals_npz_path": normals_npz_path,
+        "normals_preview_video_path": preview_video_path,
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
 def get_video_fps(input_path: str) -> float:
     command = [
         "ffprobe",
@@ -947,7 +1828,7 @@ def execute_interpolate(
     return ExecutedStep(output_path=output_path, extension=previous_step.extension)
 
 
-def upscale(input_path: str, output_path: str, width: int) -> None:
+def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
     if width <= 0:
         raise ValueError(
             f"Invalid upscale width={width}. Width must be a positive integer."
@@ -1001,12 +1882,249 @@ def upscale(input_path: str, output_path: str, width: int) -> None:
         raise RuntimeError("\n\n".join(details)) from exc
 
 
+def _get_video_dimensions(input_path: str) -> tuple[int, int]:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+        input_path,
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to probe input dimensions with ffprobe. "
+            f"Command: {shlex.join(command)}"
+        ) from exc
+
+    output = result.stdout.strip()
+    if "x" not in output:
+        raise RuntimeError(f"Unexpected ffprobe width/height output: {output}")
+
+    width_raw, height_raw = output.split("x", 1)
+    try:
+        width = int(width_raw)
+        height = int(height_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Could not parse input dimensions from ffprobe output: {output}"
+        ) from exc
+
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Non-positive video dimensions from ffprobe: {width}x{height}")
+
+    return width, height
+
+
+def _seedvr2_preflight_import_check(seedvr2_image: str, docker_gpu_args: List[str]) -> None:
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "--entrypoint",
+        "python3",
+        seedvr2_image,
+        "-c",
+        "from diffusers.loaders import single_file_model; print('seedvr2_preflight=ok')",
+    ]
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        return
+
+    stderr_text = result.stderr.strip()
+    stdout_text = result.stdout.strip()
+    details: List[str] = [
+        "SeedVR2 preflight check failed before inference.",
+        "The SeedVR2 image cannot import diffusers single_file loader.",
+        f"Image: {seedvr2_image}",
+        f"Exit code: {result.returncode}",
+        f"Command: {shlex.join(command)}",
+        "If you recently changed Dockerfile, rebuild with: make seedvr2-image",
+    ]
+    if stdout_text:
+        details.append(f"stdout:\n{stdout_text}")
+    if stderr_text:
+        details.append(f"stderr:\n{stderr_text}")
+    raise RuntimeError("\n\n".join(details))
+
+
+def upscale_seedvr2(
+    input_path: str,
+    output_path: str,
+    variant: SeedVR2UpscaleVariant,
+) -> None:
+    if variant.width <= 0:
+        raise ValueError(
+            f"Invalid upscale width={variant.width}. Width must be a positive integer."
+        )
+
+    if variant.batch_size <= 0:
+        raise ValueError(
+            f"Invalid SeedVR2 batch_size={variant.batch_size}. Must be positive."
+        )
+    if variant.batch_size != 1 and ((variant.batch_size - 1) % 4 != 0):
+        raise ValueError(
+            "SeedVR2 batch_size must follow 4n+1 (1, 5, 9, ...). "
+            f"Got: {variant.batch_size}."
+        )
+    if variant.blocks_to_swap < 0:
+        raise ValueError(
+            f"Invalid SeedVR2 blocks_to_swap={variant.blocks_to_swap}. Must be non-negative."
+        )
+    if variant.temporal_overlap < 0:
+        raise ValueError(
+            f"Invalid SeedVR2 temporal_overlap={variant.temporal_overlap}. Must be non-negative."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    output_abs = os.path.abspath(output_path)
+    input_dir = os.path.dirname(input_abs)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    input_width, input_height = _get_video_dimensions(input_abs)
+    if variant.width <= input_width:
+        raise ValueError(
+            f"Requested width={variant.width} is not larger than input width={input_width}."
+        )
+
+    scale = variant.width / input_width
+    input_short_side = min(input_width, input_height)
+    target_short_side = max(2, int(round(input_short_side * scale)))
+
+    seedvr2_image = os.environ.get("SEEDVR2_IMAGE", "video-pipelines-seedvr2:latest")
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("SEEDVR2_MODEL_CACHE_DIR", ".cache/seedvr2-model")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", seedvr2_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "SeedVR2 docker image is not available locally: "
+            f"{seedvr2_image}\n\n"
+            "Build it first with: make seedvr2-image"
+        )
+
+    _seedvr2_preflight_import_check(
+        seedvr2_image=seedvr2_image,
+        docker_gpu_args=docker_gpu_args,
+    )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "--entrypoint",
+        "python3",
+        "-v",
+        f"{input_dir}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/opt/seedvr2/models/SEEDVR2",
+        seedvr2_image,
+        "/opt/seedvr2/inference_cli.py",
+        f"/io/in/{os.path.basename(input_abs)}",
+        "--output",
+        f"/io/out/{os.path.basename(output_abs)}",
+        "--model_dir",
+        "/opt/seedvr2/models/SEEDVR2",
+        "--dit_model",
+        variant.model,
+        "--resolution",
+        str(target_short_side),
+        "--max_resolution",
+        str(variant.max_resolution),
+        "--batch_size",
+        str(variant.batch_size),
+        "--temporal_overlap",
+        str(variant.temporal_overlap),
+        "--blocks_to_swap",
+        str(variant.blocks_to_swap),
+        "--dit_offload_device",
+        variant.dit_offload_device,
+        "--vae_offload_device",
+        variant.vae_offload_device,
+        "--tensor_offload_device",
+        variant.tensor_offload_device,
+        "--vae_encode_tile_size",
+        str(variant.vae_encode_tile_size),
+        "--vae_encode_tile_overlap",
+        str(variant.vae_encode_tile_overlap),
+        "--vae_decode_tile_size",
+        str(variant.vae_decode_tile_size),
+        "--vae_decode_tile_overlap",
+        str(variant.vae_decode_tile_overlap),
+        "--video_backend",
+        "ffmpeg",
+    ]
+
+    if variant.swap_io_components:
+        command.append("--swap_io_components")
+    if variant.vae_encode_tiled:
+        command.append("--vae_encode_tiled")
+    if variant.vae_decode_tiled:
+        command.append("--vae_decode_tiled")
+    if variant.cache_dit:
+        command.append("--cache_dit")
+    if variant.cache_vae:
+        command.append("--cache_vae")
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "SeedVR2 docker upscale failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+            f"Input dimensions: {input_width}x{input_height}",
+            f"Requested output width: {variant.width}",
+            f"Derived SeedVR2 short-side resolution: {target_short_side}",
+        ]
+        details.append(
+            "OOM tip: lower batch_size (keep 4n+1), increase blocks_to_swap, "
+            "and reduce max_resolution/tile sizes."
+        )
+        if exc.stdout:
+            details.append(f"stdout:\n{exc.stdout.strip()}")
+        if exc.stderr:
+            details.append(f"stderr:\n{exc.stderr.strip()}")
+        raise RuntimeError("\n\n".join(details)) from exc
+
+
 def execute_upscale(
     step: Upscale, previous_step: ExecutedStep, output_path: str
 ) -> ExecutedStep:
-    upscale(
-        input_path=previous_step.output_path,
-        output_path=output_path,
-        width=step.width,
-    )
+    variant = step.variant
+    if isinstance(variant, EsrganUpscaleVariant):
+        upscale_esrgan(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            width=variant.width,
+        )
+    elif isinstance(variant, SeedVR2UpscaleVariant):
+        upscale_seedvr2(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            variant=variant,
+        )
+    else:
+        raise ValueError(f"Unsupported upscale variant: {variant.type}")
+
     return ExecutedStep(output_path=output_path, extension=previous_step.extension)
