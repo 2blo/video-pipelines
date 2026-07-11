@@ -121,3 +121,17 @@ job:
             window_size: 14
             time_step_size: 10
             decode_chunk_size: 7
+    nier_esrgan:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: upscale
+          variant:
+            type: esrgan
+            width: 3840
