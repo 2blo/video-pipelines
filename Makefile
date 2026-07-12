@@ -2,6 +2,9 @@ RIFE_IMAGE ?= video-pipelines-rife:latest
 ESRGAN_IMAGE ?= video-pipelines-esrgan:latest
 SEEDVR2_IMAGE ?= video-pipelines-seedvr2:latest
 DEPTH_ANYTHING_V2_IMAGE ?= video-pipelines-depth-anything-v2:latest
+DEPTH_ANYTHING_V3_IMAGE ?= video-pipelines-depth-anything-v3:latest
+DEPTH_ANYTHING_V3_STREAMING_IMAGE ?= video-pipelines-depth-anything-v3-streaming:latest
+TORCH_CHANNELS ?= cu128 cu129 cu124 cu121 nightly/cu128 nightly/cu129
 DEPTH_CRAFTER_IMAGE ?= video-pipelines-depth-crafter:latest
 DEPTH_PRO_IMAGE ?= video-pipelines-depth-pro:latest
 NORMAL_CRAFTER_IMAGE ?= video-pipelines-normal-crafter:latest
@@ -11,6 +14,7 @@ RIFE_MODEL_CACHE_DIR ?= .cache/rife-model
 ESRGAN_MODEL_CACHE_DIR ?= .cache/esrgan-model
 SEEDVR2_MODEL_CACHE_DIR ?= .cache/seedvr2-model
 DEPTH_CRAFTER_MODEL_CACHE_DIR ?= .cache/depth-crafter
+DEPTH_ANYTHING_V3_STREAMING_MODEL_CACHE_DIR ?= .cache/depth-anything-v3-streaming
 DEPTH_PRO_MODEL_CACHE_DIR ?= .cache/depth-pro
 NORMAL_CRAFTER_MODEL_CACHE_DIR ?= .cache/normal-crafter
 DKT_NORMAL_MODEL_CACHE_DIR ?= .cache/dkt-normal-model
@@ -24,7 +28,7 @@ COLMAP_VERSION ?= 4.0.3
 VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 CUDA_ARCH_LIST ?= all-major
 
-.PHONY: rife-image rife-upscale rife-example esrgan-image seedvr2-image esrgan-upscale depth-anything-v2-image depth-crafter-image depth-pro-image normal-crafter-image dkt-normal-image clean-all cli \
+.PHONY: rife-image rife-upscale rife-example esrgan-image seedvr2-image esrgan-upscale depth-anything-v2-image depth-anything-v3-image depth-anything-v3-streaming-image depth-anything-v3-streaming-image-no-cache depth-crafter-image depth-pro-image normal-crafter-image dkt-normal-image clean-all cli \
 	install-cudss build-ceres build-colmap build-pycolmap build-colmap-cuda build-all
 
 rife-image:
@@ -73,6 +77,15 @@ seedvr2-image:
 
 depth-anything-v2-image:
 	docker build -t $(DEPTH_ANYTHING_V2_IMAGE) -f docker/depth_anything_v2/Dockerfile .
+
+depth-anything-v3-image:
+	docker build -t $(DEPTH_ANYTHING_V3_IMAGE) -f docker/depth_anything_v3/Dockerfile .
+
+depth-anything-v3-streaming-image:
+	docker build --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(DEPTH_ANYTHING_V3_STREAMING_IMAGE) -f docker/depth_anything_v3_streaming/Dockerfile .
+
+depth-anything-v3-streaming-image-no-cache:
+	docker build --no-cache --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(DEPTH_ANYTHING_V3_STREAMING_IMAGE) -f docker/depth_anything_v3_streaming/Dockerfile .
 
 depth-crafter-image:
 	docker build -t $(DEPTH_CRAFTER_IMAGE) -f docker/depth_crafter/Dockerfile .

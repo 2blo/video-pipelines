@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 import os
 from pathlib import Path
 from typing import Dict, List
+from inspect import signature
 
 import cv2
 import numpy as np
@@ -78,6 +79,9 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--encoder", choices=["vits", "vitb", "vitl", "vitg"], default="vitl")
     parser.add_argument("--input-size", type=int, default=518)
+    parser.add_argument("--precision", choices=["fp32", "fp16"], default="fp32")
+    parser.add_argument("--fast-resize-height", type=int, default=0)
+    parser.add_argument("--temporal-smoothing-alpha", type=float, default=0.0)
     args = parser.parse_args()
 
     input_video = Path(args.input_video).resolve()
@@ -90,6 +94,12 @@ def main() -> None:
     if args.input_size <= 0:
         raise RuntimeError("input_size must be positive")
 
+    if args.fast_resize_height < 0:
+        raise RuntimeError("fast_resize_height must be >= 0")
+
+    if args.temporal_smoothing_alpha < 0.0 or args.temporal_smoothing_alpha > 1.0:
+        raise RuntimeError("temporal_smoothing_alpha must be in [0.0, 1.0]")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint_path, effective_encoder = _resolve_checkpoint(
         args.encoder, Path("/opt/depth-anything-v2/checkpoints")
@@ -98,6 +108,14 @@ def main() -> None:
     model = DepthAnythingV2(**configs[effective_encoder])
     model.load_state_dict(torch.load(str(checkpoint_path), map_location="cpu"))
     model = model.to(device).eval()
+
+    if args.precision == "fp16" and device == "cuda":
+        model = model.half()
+    else:
+        if args.precision == "fp16":
+            print("fp16 requested but CUDA is unavailable. Falling back to fp32.")
+            args.precision = "fp32"
+        model = model.float()
 
     depth_maps_dir = output_dir / "depth_maps"
     depth_maps_dir.mkdir(parents=True, exist_ok=True)
@@ -122,12 +140,97 @@ def main() -> None:
     )
 
     frame_count = 0
+    previous_normalized = None
+    infer_sig = signature(model.infer_image)
+    supports_precision_arg = "precision" in infer_sig.parameters
+    supports_newheight_arg = "newHeight" in infer_sig.parameters
+    supports_newwidth_arg = "newWidth" in infer_sig.parameters
+
+    fallback_sizes: List[int] = []
+    for candidate in [
+        args.input_size,
+        3072,
+        2560,
+        2048,
+        1536,
+        1280,
+        1024,
+        768,
+        518,
+    ]:
+        if candidate <= args.input_size and candidate > 0 and candidate not in fallback_sizes:
+            fallback_sizes.append(candidate)
+
+    def _is_oom_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "out of memory" in message or "cuda out of memory" in message
+
+    def _infer_with_retry(frame: np.ndarray) -> np.ndarray:
+        last_exc: Exception | None = None
+
+        for size_index, current_size in enumerate(fallback_sizes):
+            infer_kwargs = {}
+            if supports_precision_arg:
+                infer_kwargs["precision"] = args.precision
+
+            effective_size = current_size
+            if (
+                args.fast_resize_height > 0
+                and supports_newheight_arg
+                and supports_newwidth_arg
+            ):
+                frame_height_local, frame_width_local = frame.shape[:2]
+                aspect_ratio = frame_width_local / frame_height_local
+                target_height = args.fast_resize_height
+                target_width = round((target_height * aspect_ratio) / 14) * 14
+                target_width = max(14, (target_width // 14) * 14)
+                infer_kwargs["newHeight"] = target_height
+                infer_kwargs["newWidth"] = target_width
+                effective_size = min(effective_size, max(target_height, target_width))
+
+            try:
+                if args.precision == "fp16" and device == "cuda":
+                    autocast_context = torch.autocast(device_type="cuda", dtype=torch.float16)
+                else:
+                    autocast_context = torch.autocast(device_type="cpu", enabled=False)
+
+                with autocast_context:
+                    depth_pred = model.infer_image(frame, effective_size, **infer_kwargs)
+
+                if isinstance(depth_pred, torch.Tensor):
+                    depth_pred = depth_pred.detach().float().cpu().numpy()
+                return depth_pred
+            except Exception as exc:
+                last_exc = exc
+                if not _is_oom_error(exc):
+                    raise
+
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+
+                if size_index == len(fallback_sizes) - 1:
+                    raise RuntimeError(
+                        "Depth Anything V2 ran out of CUDA memory for all fallback inference sizes. "
+                        f"Tried sizes: {fallback_sizes}. Last error: {exc}"
+                    ) from exc
+
+                next_size = fallback_sizes[size_index + 1]
+                print(
+                    "Depth Anything V2 OOM at input_size="
+                    f"{effective_size}; retrying this frame with input_size={next_size}."
+                )
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Depth Anything V2 inference failed unexpectedly.")
+
     while True:
         ok, frame = cap.read()
         if not ok:
             break
 
-        depth = model.infer_image(frame, args.input_size)
+        depth = _infer_with_retry(frame)
+
         depth_min = float(depth.min())
         depth_max = float(depth.max())
 
@@ -135,6 +238,12 @@ def main() -> None:
             normalized = (depth - depth_min) / (depth_max - depth_min)
         else:
             normalized = np.zeros_like(depth)
+
+        if args.temporal_smoothing_alpha > 0.0 and previous_normalized is not None:
+            alpha = args.temporal_smoothing_alpha
+            normalized = (alpha * previous_normalized) + ((1.0 - alpha) * normalized)
+
+        previous_normalized = normalized
 
         depth_u8 = (normalized * 255.0).astype(np.uint8)
         frame_count += 1

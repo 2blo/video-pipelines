@@ -31,3 +31,19 @@ Alternatives:
     - may have more control over lightning etc
     - may be more performant vs working on a exported video layer.
 - 3d camera track can be swapper with after effects built in tracker.
+
+## Current findings
+
+- upscale to 4k
+  - seedvr2 unstable, worked some time but crash usually
+  - esrgan stable, a bit slow.
+- depth
+  - depth anything v2/3:
+    - crash 4k
+  - depth crafter:
+    - crash 4k
+    - 150-400s/it in 1080p. way too slow.
+    - works well with new settings, a couple minutes?
+  - the anime scripter: poor quality
+  - depth anything v3 streaming: cuda device not ready.
+- normal

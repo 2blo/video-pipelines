@@ -98,12 +98,37 @@ class DepthAnythingV2(BaseModel):
     type: Literal["depth_anything_v2"]
     encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
     input_size: int = 518
+    precision: Literal["fp32", "fp16"] = "fp32"
+    fast_resize_height: int | None = None
+    temporal_smoothing_alpha: float = 0.0
 
 
 class DepthAnythingV2Variant(BaseModel):
     type: Literal["depth_anything_v2"]
     encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
     input_size: int = 518
+    precision: Literal["fp32", "fp16"] = "fp32"
+    fast_resize_height: int | None = None
+    temporal_smoothing_alpha: float = 0.0
+
+
+class DepthAnythingV3Variant(BaseModel):
+    type: Literal["depth_anything_v3"]
+    model: Literal["small"] = "small"
+    max_res: int = 2160
+
+
+class DepthAnythingV3StreamingVariant(BaseModel):
+    type: Literal["depth_anything_v3_streaming"]
+    max_res: int | None = None
+    fps: float | None = None
+    device: Literal["auto", "cuda", "cpu"] = "auto"
+    chunk_size: int = 64
+    overlap: int = 24
+    loop_enable: bool = False
+    save_depth_conf_result: bool = True
+    delete_temp_files: bool = True
+    align_lib: Literal["triton", "torch", "numba", "numpy"] = "torch"
 
 
 class DepthCrafterVariant(BaseModel):
@@ -111,6 +136,7 @@ class DepthCrafterVariant(BaseModel):
     max_res: int | None = None
     process_length: int | None = None
     target_fps: int | None = None
+    max_megapixel_frames: float | None = None
 
 
 class DepthProVariant(BaseModel):
@@ -119,7 +145,11 @@ class DepthProVariant(BaseModel):
 
 
 DepthVariant = Annotated[
-    DepthAnythingV2Variant | DepthCrafterVariant | DepthProVariant,
+    DepthAnythingV2Variant
+    | DepthAnythingV3Variant
+    | DepthAnythingV3StreamingVariant
+    | DepthCrafterVariant
+    | DepthProVariant,
     Field(discriminator="type"),
 ]
 

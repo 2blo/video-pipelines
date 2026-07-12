@@ -17,6 +17,8 @@ from pipe.config import (
     DktNormalsVariant,
     DepthAnythingV2,
     DepthAnythingV2Variant,
+    DepthAnythingV3StreamingVariant,
+    DepthAnythingV3Variant,
     Encode,
     EsrganUpscaleVariant,
     Ffmpeg,
@@ -193,7 +195,9 @@ def execute_manual_download(
             and changed_files
             and all(f in stable_now for f in changed_files if f in current_sizes)
         ):
-            candidates = [f for f in changed_files if f in current_sizes and f in stable_now]
+            candidates = [
+                f for f in changed_files if f in current_sizes and f in stable_now
+            ]
             if not candidates:
                 sleep(0.5)
                 continue
@@ -828,10 +832,27 @@ def depth_anything_v2(
     output_path: str,
     encoder: str,
     input_size: int,
+    precision: str,
+    fast_resize_height: int | None,
+    temporal_smoothing_alpha: float,
 ) -> None:
     if input_size <= 0:
         raise ValueError(
             f"Invalid input_size={input_size}. input_size must be a positive integer."
+        )
+
+    if precision not in ["fp32", "fp16"]:
+        raise ValueError(f"Unsupported precision={precision}. Use one of: fp32, fp16.")
+
+    if fast_resize_height is not None and fast_resize_height <= 0:
+        raise ValueError(
+            f"Invalid fast_resize_height={fast_resize_height}. Use a positive integer or null."
+        )
+
+    if temporal_smoothing_alpha < 0.0 or temporal_smoothing_alpha > 1.0:
+        raise ValueError(
+            "Invalid temporal_smoothing_alpha="
+            f"{temporal_smoothing_alpha}. Use a value in [0.0, 1.0]."
         )
 
     input_abs = os.path.abspath(input_path)
@@ -886,6 +907,9 @@ def depth_anything_v2(
         f"/io/out/{depth_workspace_name}",
         encoder,
         str(input_size),
+        precision,
+        str(fast_resize_height) if fast_resize_height is not None else "0",
+        str(temporal_smoothing_alpha),
     ]
 
     try:
@@ -914,6 +938,9 @@ def depth_anything_v2(
         "input_video_path": input_abs,
         "encoder": encoder,
         "input_size": input_size,
+        "precision": precision,
+        "fast_resize_height": fast_resize_height,
+        "temporal_smoothing_alpha": temporal_smoothing_alpha,
         "depth_workspace_dir": depth_workspace_dir,
         "depth_maps_dir": depth_maps_dir,
         "depth_preview_video_path": preview_video_path,
@@ -934,8 +961,115 @@ def execute_depth_anything_v2(
         output_path=output_path,
         encoder=step.encoder,
         input_size=step.input_size,
+        precision=step.precision,
+        fast_resize_height=step.fast_resize_height,
+        temporal_smoothing_alpha=step.temporal_smoothing_alpha,
     )
     return ExecutedStep(output_path=output_path, extension=".json")
+
+
+def depth_anything_v3(
+    input_path: str,
+    output_path: str,
+    model: str,
+    max_res: int,
+) -> None:
+    if model not in ["small"]:
+        raise ValueError(f"Unsupported model={model}. Use one of: small.")
+
+    if max_res <= 0:
+        raise ValueError(
+            f"Invalid max_res={max_res}. max_res must be a positive integer."
+        )
+
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    depth_workspace_dir = os.path.join(output_dir, f"{output_stem}_depth_anything_v3")
+    depth_workspace_name = os.path.basename(depth_workspace_dir)
+    depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
+    preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
+
+    depth_image = os.environ.get(
+        "DEPTH_ANYTHING_V3_IMAGE", "video-pipelines-depth-anything-v3:latest"
+    )
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get("DEPTH_ANYTHING_V3_MODEL_CACHE_DIR", ".cache/depth-anything-v3")
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", depth_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "Depth Anything V3 docker image is not available locally: "
+            f"{depth_image}\n\n"
+            "Build it first with: make depth-anything-v3-image"
+        )
+
+    command: List[str] = [
+        "docker",
+        "run",
+        "--rm",
+        *docker_gpu_args,
+        "-v",
+        f"{os.path.dirname(input_abs)}:/io/in:ro",
+        "-v",
+        f"{output_dir}:/io/out",
+        "-v",
+        f"{model_cache_dir}:/root/.cache/huggingface",
+        depth_image,
+        f"/io/in/{os.path.basename(input_abs)}",
+        f"/io/out/{depth_workspace_name}",
+        model,
+        str(max_res),
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        details: List[str] = [
+            "Depth Anything V3 docker inference failed.",
+            f"Exit code: {exc.returncode}",
+            f"Command: {shlex.join(command)}",
+        ]
+        raise RuntimeError("\n\n".join(details)) from exc
+
+    depth_pngs = (
+        [name for name in os.listdir(depth_maps_dir) if name.lower().endswith(".png")]
+        if os.path.isdir(depth_maps_dir)
+        else []
+    )
+
+    if not depth_pngs:
+        raise RuntimeError(
+            "Depth Anything V3 completed but produced no depth PNG files at "
+            f"{depth_maps_dir}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "model": model,
+        "max_res": max_res,
+        "depth_workspace_dir": depth_workspace_dir,
+        "depth_maps_dir": depth_maps_dir,
+        "depth_preview_video_path": preview_video_path,
+        "num_depth_maps": len(depth_pngs),
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
 
 
 def depth_crafter(
@@ -944,58 +1078,72 @@ def depth_crafter(
     max_res: int | None,
     process_length: int | None,
     target_fps: int | None,
+    max_megapixel_frames: float | None,
 ) -> None:
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
         raise FileNotFoundError(f"Video input not found: {input_abs}")
 
-    if max_res is None or process_length is None or target_fps is None:
-        probe_command: List[str] = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,avg_frame_rate,nb_frames",
-            "-of",
-            "json",
-            input_abs,
-        ]
-        try:
-            probe_result = subprocess.run(
-                probe_command,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            probe_json = json.loads(probe_result.stdout)
-            streams = probe_json["streams"]
-            if not streams:
-                raise ValueError("No video stream found in input file.")
-            stream = streams[0]
+    source_width: int | None = None
+    source_height: int | None = None
+    source_fps: float | None = None
+    source_nb_frames: int | None = None
 
-            if max_res is None:
-                width = int(stream["width"])
-                height = int(stream["height"])
-                max_res = max(width, height)
+    probe_command: List[str] = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,nb_frames",
+        "-of",
+        "json",
+        input_abs,
+    ]
+    try:
+        probe_result = subprocess.run(
+            probe_command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        probe_json = json.loads(probe_result.stdout)
+        streams = probe_json["streams"]
+        if not streams:
+            raise ValueError("No video stream found in input file.")
+        stream = streams[0]
 
-            if target_fps is None:
-                avg_frame_rate = str(stream["avg_frame_rate"])
-                if avg_frame_rate == "0/0":
-                    raise ValueError("avg_frame_rate is 0/0.")
-                numerator, denominator = avg_frame_rate.split("/", 1)
-                fps = float(numerator) / float(denominator)
-                target_fps = max(1, int(round(fps)))
+        source_width = int(stream["width"])
+        source_height = int(stream["height"])
 
-            if process_length is None:
-                nb_frames = stream.get("nb_frames")
-                process_length = int(nb_frames) if nb_frames not in [None, "N/A"] else -1
-        except Exception as exc:
+        avg_frame_rate = str(stream["avg_frame_rate"])
+        if avg_frame_rate != "0/0":
+            numerator, denominator = avg_frame_rate.split("/", 1)
+            source_fps = float(numerator) / float(denominator)
+
+        nb_frames = stream.get("nb_frames")
+        if nb_frames not in [None, "N/A"]:
+            source_nb_frames = int(nb_frames)
+    except Exception as exc:
+        if max_res is None or process_length is None or target_fps is None:
             raise RuntimeError(
                 "Failed to derive DepthCrafter defaults from input footage. "
                 "Provide max_res/target_fps/process_length explicitly or ensure ffprobe metadata is available."
             ) from exc
+
+    if max_res is None:
+        if source_width is None or source_height is None:
+            raise RuntimeError("Could not infer source resolution for DepthCrafter.")
+        max_res = max(source_width, source_height)
+
+    if target_fps is None:
+        if source_fps is None:
+            raise RuntimeError("Could not infer source fps for DepthCrafter.")
+        target_fps = max(1, int(round(source_fps)))
+
+    if process_length is None:
+        process_length = source_nb_frames if source_nb_frames is not None else -1
 
     if max_res <= 0:
         raise ValueError(
@@ -1011,6 +1159,74 @@ def depth_crafter(
         raise ValueError(
             f"Invalid process_length={process_length}. Use -1 for full clip length or a positive integer."
         )
+
+    chunk_frame_limit: int | None = None
+    frames_for_estimation: int | None = None
+
+    # DepthCrafter can crash with "input tensor must fit into 32-bit index math"
+    # for long high-res clips. Keep max_res unchanged and switch to chunked processing.
+    if (
+        source_width is not None
+        and source_height is not None
+        and source_nb_frames is not None
+        and source_nb_frames > 0
+    ):
+        frames_for_estimation = (
+            process_length if process_length > 0 else source_nb_frames
+        )
+        source_long_edge = max(source_width, source_height)
+        scale = min(1.0, max_res / source_long_edge)
+        estimated_w = int(round(source_width * scale))
+        estimated_h = int(round(source_height * scale))
+        # Match DepthCrafter preprocessing behavior (multiple-of-32 shape).
+        estimated_w = max(32, ((estimated_w + 31) // 32) * 32)
+        estimated_h = max(32, ((estimated_h + 31) // 32) * 32)
+
+        max_index_elements = int(
+            os.environ.get("DEPTH_CRAFTER_MAX_INDEX_ELEMENTS", "2000000000")
+        )
+        estimated_elements = frames_for_estimation * 3 * estimated_h * estimated_w
+        estimated_megapixels_per_frame = (estimated_h * estimated_w) / 1_000_000.0
+
+        effective_max_megapixel_frames = (
+            max_megapixel_frames
+            if max_megapixel_frames is not None
+            else float(os.environ.get("DEPTH_CRAFTER_MAX_MEGAPIXEL_FRAMES", "120"))
+        )
+        if effective_max_megapixel_frames <= 0:
+            raise ValueError("max_megapixel_frames must be a positive number when set.")
+        vram_chunk_limit = max(
+            1,
+            int(
+                effective_max_megapixel_frames
+                / max(estimated_megapixels_per_frame, 1e-6)
+            ),
+        )
+        if frames_for_estimation > vram_chunk_limit:
+            chunk_frame_limit = vram_chunk_limit
+            print(
+                "DepthCrafter chunked mode enabled for VRAM safety while preserving "
+                f"max_res={max_res}. Processing in chunks of up to {chunk_frame_limit} frames."
+            )
+
+        if estimated_elements > max_index_elements:
+            max_frames_per_chunk = max_index_elements // (3 * estimated_h * estimated_w)
+            if max_frames_per_chunk < 1:
+                raise RuntimeError(
+                    "DepthCrafter input exceeds 32-bit index limits even for a single frame at this "
+                    f"resolution. Configured max_res={max_res}, estimated shape={estimated_h}x{estimated_w}."
+                )
+
+            index_chunk_limit = max(1, int(max_frames_per_chunk * 0.9))
+            chunk_frame_limit = (
+                index_chunk_limit
+                if chunk_frame_limit is None
+                else min(chunk_frame_limit, index_chunk_limit)
+            )
+            print(
+                "DepthCrafter chunked mode enabled to avoid 32-bit index overflow while preserving "
+                f"max_res={max_res}. Processing in chunks of up to {chunk_frame_limit} frames."
+            )
 
     output_abs = os.path.abspath(output_path)
     output_dir = os.path.dirname(output_abs)
@@ -1046,6 +1262,361 @@ def depth_crafter(
             "Build it first with: make depth-crafter-image"
         )
 
+    def _run_depth_crafter_docker(
+        input_video_path: str,
+        process_length_for_run: int,
+    ) -> None:
+        input_video_abs = os.path.abspath(input_video_path)
+        command: List[str] = [
+            "docker",
+            "run",
+            "--rm",
+            *docker_gpu_args,
+            "-v",
+            f"{os.path.dirname(input_video_abs)}:/io/in:ro",
+            "-v",
+            f"{output_dir}:/io/out",
+            "-v",
+            f"{model_cache_dir}:/root/.cache/huggingface",
+            depth_image,
+            f"/io/in/{os.path.basename(input_video_abs)}",
+            f"/io/out/{depth_workspace_name}",
+            str(max_res),
+            str(process_length_for_run),
+            str(target_fps),
+        ]
+
+        print(f"Running DepthCrafter docker command: {shlex.join(command)}")
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as exc:
+            details: List[str] = [
+                "DepthCrafter docker inference failed.",
+                f"Exit code: {exc.returncode}",
+                f"Command: {shlex.join(command)}",
+            ]
+            raise RuntimeError("\n\n".join(details)) from exc
+
+    used_chunking = chunk_frame_limit is not None and frames_for_estimation is not None
+    if not used_chunking:
+        _run_depth_crafter_docker(
+            input_video_path=input_abs,
+            process_length_for_run=process_length,
+        )
+
+        if not os.path.exists(depth_npz_path):
+            raise RuntimeError(
+                f"DepthCrafter completed but produced no depth NPZ file at {depth_npz_path}"
+            )
+    else:
+        import tempfile
+
+        import numpy as np  # pyright: ignore[reportMissingImports]
+
+        if chunk_frame_limit is None or frames_for_estimation is None:
+            raise RuntimeError("DepthCrafter chunked mode internal state is invalid.")
+
+        if source_fps is None or source_fps <= 0:
+            raise RuntimeError(
+                "Chunked DepthCrafter requires source fps metadata, but it could not be determined."
+            )
+
+        with tempfile.TemporaryDirectory(prefix="depth_crafter_chunks_") as temp_dir:
+            chunk_stems: List[str] = []
+
+            total_frames = int(frames_for_estimation)
+            chunk_frame_limit_int = int(chunk_frame_limit)
+
+            def _build_chunk_video(
+                start_frame_idx: int,
+                end_frame_idx: int,
+                chunk_stem: str,
+            ) -> str:
+                start_time = start_frame_idx / source_fps
+                end_time = end_frame_idx / source_fps
+                chunk_path = os.path.join(temp_dir, f"{chunk_stem}.mp4")
+
+                split_command = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{start_time:.6f}",
+                    "-to",
+                    f"{end_time:.6f}",
+                    "-i",
+                    input_abs,
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-sn",
+                    "-dn",
+                    "-fflags",
+                    "+genpts",
+                    "-fps_mode",
+                    "cfr",
+                    "-r",
+                    f"{source_fps:.6f}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    chunk_path,
+                ]
+                _run_subprocess(
+                    split_command,
+                    "Failed to split input video for DepthCrafter chunked processing.",
+                )
+
+                if not os.path.exists(chunk_path):
+                    raise RuntimeError(f"Failed to create chunk video: {chunk_path}")
+
+                return chunk_path
+
+            def _run_chunk_range(
+                start_frame_idx: int,
+                end_frame_idx: int,
+                chunk_stem: str,
+            ) -> None:
+                chunk_path = _build_chunk_video(
+                    start_frame_idx, end_frame_idx, chunk_stem
+                )
+                try:
+                    _run_depth_crafter_docker(
+                        input_video_path=chunk_path,
+                        process_length_for_run=-1,
+                    )
+                except RuntimeError as exc:
+                    frame_count = end_frame_idx - start_frame_idx
+                    if frame_count <= 1:
+                        raise RuntimeError(
+                            "DepthCrafter failed even for a single-frame chunk at configured "
+                            f"max_res={max_res}. Cannot keep this resolution for this model/runtime."
+                        ) from exc
+
+                    midpoint = start_frame_idx + (frame_count // 2)
+                    left_stem = f"{chunk_stem}a"
+                    right_stem = f"{chunk_stem}b"
+                    print(
+                        "DepthCrafter chunk failed; retrying by splitting range "
+                        f"[{start_frame_idx}, {end_frame_idx}) into "
+                        f"[{start_frame_idx}, {midpoint}) and [{midpoint}, {end_frame_idx})."
+                    )
+                    _run_chunk_range(start_frame_idx, midpoint, left_stem)
+                    _run_chunk_range(midpoint, end_frame_idx, right_stem)
+                    return
+
+                chunk_stems.append(chunk_stem)
+
+            start_frame = 0
+            chunk_index = 0
+            while start_frame < total_frames:
+                end_frame = min(total_frames, start_frame + chunk_frame_limit_int)
+                chunk_stem = f"{input_stem}_chunk_{chunk_index:04d}"
+                _run_chunk_range(start_frame, end_frame, chunk_stem)
+                start_frame = end_frame
+                chunk_index += 1
+
+            chunk_depth_arrays: List[Any] = []
+            concat_list_path = os.path.join(temp_dir, "vis_concat.txt")
+            with open(concat_list_path, "w") as concat_list:
+                for chunk_stem in chunk_stems:
+                    chunk_npz_path = os.path.join(
+                        depth_workspace_dir, f"{chunk_stem}.npz"
+                    )
+                    if not os.path.exists(chunk_npz_path):
+                        raise RuntimeError(
+                            "DepthCrafter chunk completed but produced no depth NPZ file at "
+                            f"{chunk_npz_path}"
+                        )
+
+                    chunk_depth_arrays.append(np.load(chunk_npz_path)["depth"])
+
+                    chunk_vis_path = os.path.join(
+                        depth_workspace_dir, f"{chunk_stem}_vis.mp4"
+                    )
+                    if os.path.exists(chunk_vis_path):
+                        concat_list.write(f"file '{chunk_vis_path}'\n")
+
+            merged_depth = np.concatenate(chunk_depth_arrays, axis=0)
+            if merged_depth.shape[0] > total_frames:
+                merged_depth = merged_depth[:total_frames]
+            np.savez_compressed(depth_npz_path, depth=merged_depth)
+
+            if os.path.getsize(concat_list_path) > 0:
+                concat_command = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    concat_list_path,
+                    "-c",
+                    "copy",
+                    preview_video_path,
+                ]
+                _run_subprocess(
+                    concat_command,
+                    "Failed to concatenate DepthCrafter chunk preview videos.",
+                )
+
+    output = {
+        "input_video_path": input_abs,
+        "max_res": max_res,
+        "process_length": process_length,
+        "target_fps": target_fps,
+        "chunked_processing": used_chunking,
+        "chunk_frame_limit": chunk_frame_limit,
+        "depth_workspace_dir": depth_workspace_dir,
+        "depth_npz_path": depth_npz_path,
+        "depth_preview_video_path": preview_video_path,
+    }
+
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+
+
+def depth_anything_v3_streaming(
+    input_path: str,
+    output_path: str,
+    max_res: int | None,
+    fps: float | None,
+    device: str,
+    chunk_size: int,
+    overlap: int,
+    loop_enable: bool,
+    save_depth_conf_result: bool,
+    delete_temp_files: bool,
+    align_lib: str,
+) -> None:
+    input_abs = os.path.abspath(input_path)
+    if not os.path.exists(input_abs):
+        raise FileNotFoundError(f"Video input not found: {input_abs}")
+
+    source_width: int | None = None
+    source_height: int | None = None
+    source_fps: float | None = None
+
+    if max_res is None or fps is None:
+        probe_command: List[str] = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate",
+            "-of",
+            "json",
+            input_abs,
+        ]
+        try:
+            probe_result = subprocess.run(
+                probe_command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            probe_json = json.loads(probe_result.stdout)
+            streams = probe_json["streams"]
+            if not streams:
+                raise ValueError("No video stream found in input file.")
+            stream = streams[0]
+
+            source_width = int(stream["width"])
+            source_height = int(stream["height"])
+
+            avg_frame_rate = str(stream["avg_frame_rate"])
+            if avg_frame_rate != "0/0":
+                numerator, denominator = avg_frame_rate.split("/", 1)
+                source_fps = float(numerator) / float(denominator)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to derive DA3 streaming defaults from input footage. "
+                "Provide fps/max_res explicitly or ensure ffprobe metadata is available."
+            ) from exc
+
+    if max_res is None:
+        if source_width is None or source_height is None:
+            raise RuntimeError("Could not infer source resolution for DA3 streaming.")
+        max_res = max(source_width, source_height)
+
+    if fps is None:
+        if source_fps is None:
+            raise RuntimeError("Could not infer source fps for DA3 streaming.")
+        fps = source_fps
+
+    if max_res <= 0:
+        raise ValueError(
+            f"Invalid max_res={max_res}. max_res must be a positive integer."
+        )
+
+    if fps <= 0:
+        raise ValueError(f"Invalid fps={fps}. fps must be a positive number.")
+
+    if chunk_size <= 0:
+        raise ValueError(
+            f"Invalid chunk_size={chunk_size}. chunk_size must be a positive integer."
+        )
+
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError(
+            f"Invalid overlap={overlap}. overlap must be >= 0 and less than chunk_size={chunk_size}."
+        )
+
+    if align_lib not in ["triton", "torch", "numba", "numpy"]:
+        raise ValueError(
+            f"Unsupported align_lib={align_lib}. Use one of: triton, torch, numba, numpy."
+        )
+
+    if device not in ["auto", "cuda", "cpu"]:
+        raise ValueError(f"Unsupported device={device}. Use one of: auto, cuda, cpu.")
+
+    output_abs = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_abs)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+    depth_workspace_dir = os.path.join(
+        output_dir, f"{output_stem}_depth_anything_v3_streaming"
+    )
+    depth_workspace_name = os.path.basename(depth_workspace_dir)
+    depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
+    preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
+
+    depth_image = os.environ.get(
+        "DEPTH_ANYTHING_V3_STREAMING_IMAGE",
+        "video-pipelines-depth-anything-v3-streaming:latest",
+    )
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
+    model_cache_dir = os.path.abspath(
+        os.environ.get(
+            "DEPTH_ANYTHING_V3_STREAMING_MODEL_CACHE_DIR",
+            ".cache/depth-anything-v3-streaming",
+        )
+    )
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    image_check = subprocess.run(
+        ["docker", "image", "inspect", depth_image],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if image_check.returncode != 0:
+        raise RuntimeError(
+            "Depth Anything V3 Streaming docker image is not available locally: "
+            f"{depth_image}\n\n"
+            "Build it first with: make depth-anything-v3-streaming-image"
+        )
+
     command: List[str] = [
         "docker",
         "run",
@@ -1056,39 +1627,81 @@ def depth_crafter(
         "-v",
         f"{output_dir}:/io/out",
         "-v",
-        f"{model_cache_dir}:/root/.cache/huggingface",
-        depth_image,
-        f"/io/in/{os.path.basename(input_abs)}",
-        f"/io/out/{depth_workspace_name}",
-        str(max_res),
-        str(process_length),
-        str(target_fps),
+        f"{model_cache_dir}:/models",
     ]
 
-    print(f"Running DepthCrafter docker command: {shlex.join(command)}")
+    passthrough_env_names = [
+        "VIDEO_PIPELINES_DA3_DEBUG_CUDA",
+        "CUDA_LAUNCH_BLOCKING",
+        "CUDA_MODULE_LOADING",
+        "CUDA_DEVICE_MAX_CONNECTIONS",
+        "PYTORCH_CUDA_ALLOC_CONF",
+    ]
+    for env_name in passthrough_env_names:
+        env_value = os.environ.get(env_name)
+        if env_value is None:
+            continue
+        command.extend(["-e", f"{env_name}={env_value}"])
+
+    command.extend(
+        [
+            depth_image,
+            f"/io/in/{os.path.basename(input_abs)}",
+            f"/io/out/{depth_workspace_name}",
+            str(max_res),
+            str(fps),
+            device,
+            str(chunk_size),
+            str(overlap),
+            "1" if loop_enable else "0",
+            "1" if save_depth_conf_result else "0",
+            "1" if delete_temp_files else "0",
+            align_lib,
+        ]
+    )
+
     try:
         subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
         details: List[str] = [
-            "DepthCrafter docker inference failed.",
+            "Depth Anything V3 Streaming docker inference failed.",
             f"Exit code: {exc.returncode}",
             f"Command: {shlex.join(command)}",
         ]
         raise RuntimeError("\n\n".join(details)) from exc
 
-    if not os.path.exists(depth_npz_path):
+    depth_pngs = (
+        [name for name in os.listdir(depth_maps_dir) if name.lower().endswith(".png")]
+        if os.path.isdir(depth_maps_dir)
+        else []
+    )
+
+    if not depth_pngs:
         raise RuntimeError(
-            f"DepthCrafter completed but produced no depth NPZ file at {depth_npz_path}"
+            "Depth Anything V3 Streaming completed but produced no depth PNG files at "
+            f"{depth_maps_dir}"
         )
 
     output = {
         "input_video_path": input_abs,
         "max_res": max_res,
-        "process_length": process_length,
-        "target_fps": target_fps,
+        "fps": fps,
+        "device": device,
+        "chunk_size": chunk_size,
+        "overlap": overlap,
+        "loop_enable": loop_enable,
+        "save_depth_conf_result": save_depth_conf_result,
+        "delete_temp_files": delete_temp_files,
+        "align_lib": align_lib,
         "depth_workspace_dir": depth_workspace_dir,
-        "depth_npz_path": depth_npz_path,
+        "depth_maps_dir": depth_maps_dir,
         "depth_preview_video_path": preview_video_path,
+        "num_depth_maps": len(depth_pngs),
+        "camera_poses_path": os.path.join(depth_workspace_dir, "camera_poses.txt"),
+        "intrinsics_path": os.path.join(depth_workspace_dir, "intrinsic.txt"),
+        "point_cloud_path": os.path.join(
+            depth_workspace_dir, "pcd", "combined_pcd.ply"
+        ),
     }
 
     with open(output_abs, "w") as f:
@@ -1101,9 +1714,7 @@ def depth_pro(
     precision: str,
 ) -> None:
     if precision not in ["fp16", "fp32"]:
-        raise ValueError(
-            f"Unsupported precision={precision}. Use one of: fp16, fp32."
-        )
+        raise ValueError(f"Unsupported precision={precision}. Use one of: fp16, fp32.")
 
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -1190,8 +1801,7 @@ def depth_pro(
 
     if not depth_pngs:
         raise RuntimeError(
-            "Depth Pro completed but produced no depth PNG files at "
-            f"{depth_maps_dir}"
+            f"Depth Pro completed but produced no depth PNG files at {depth_maps_dir}"
         )
 
     output = {
@@ -1221,6 +1831,30 @@ def execute_depth(
             output_path=output_path,
             encoder=variant.encoder,
             input_size=variant.input_size,
+            precision=variant.precision,
+            fast_resize_height=variant.fast_resize_height,
+            temporal_smoothing_alpha=variant.temporal_smoothing_alpha,
+        )
+    elif isinstance(variant, DepthAnythingV3Variant):
+        depth_anything_v3(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            model=variant.model,
+            max_res=variant.max_res,
+        )
+    elif isinstance(variant, DepthAnythingV3StreamingVariant):
+        depth_anything_v3_streaming(
+            input_path=previous_step.output_path,
+            output_path=output_path,
+            max_res=variant.max_res,
+            fps=variant.fps,
+            device=variant.device,
+            chunk_size=variant.chunk_size,
+            overlap=variant.overlap,
+            loop_enable=variant.loop_enable,
+            save_depth_conf_result=variant.save_depth_conf_result,
+            delete_temp_files=variant.delete_temp_files,
+            align_lib=variant.align_lib,
         )
     elif isinstance(variant, DepthCrafterVariant):
         depth_crafter(
@@ -1229,6 +1863,7 @@ def execute_depth(
             max_res=variant.max_res,
             process_length=variant.process_length,
             target_fps=variant.target_fps,
+            max_megapixel_frames=variant.max_megapixel_frames,
         )
     elif isinstance(variant, DepthProVariant):
         depth_pro(
@@ -1917,12 +2552,16 @@ def _get_video_dimensions(input_path: str) -> tuple[int, int]:
         ) from exc
 
     if width <= 0 or height <= 0:
-        raise RuntimeError(f"Non-positive video dimensions from ffprobe: {width}x{height}")
+        raise RuntimeError(
+            f"Non-positive video dimensions from ffprobe: {width}x{height}"
+        )
 
     return width, height
 
 
-def _seedvr2_preflight_import_check(seedvr2_image: str, docker_gpu_args: List[str]) -> None:
+def _seedvr2_preflight_import_check(
+    seedvr2_image: str, docker_gpu_args: List[str]
+) -> None:
     command = [
         "docker",
         "run",

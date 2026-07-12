@@ -46,6 +46,28 @@ job:
             type: depth_anything_v2
             encoder: vitl
             input_size: 518
+    nier_depth_anything_v2_esrgan:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: upscale
+          variant:
+            type: esrgan
+            width: 3840
+        - type: depth
+          variant:
+            type: depth_anything_v2
+            encoder: vitl
+            input_size: 3840
+            precision: fp16
+            fast_resize_height: 518
+            temporal_smoothing_alpha: 0.2
     nier_depth_crafter:
       metadata: {}
       input:
@@ -59,8 +81,32 @@ job:
         - type: depth
           variant:
             type: depth_crafter
-            # max_res: 1024
-            max_res: 1920
+            max_res: 1080
+            # target_fps: 12
+            process_length: -1
+            max_megapixel_frames: 80
+    nier_depth_anything_v3_streaming:
+      metadata: {}
+      input:
+        link: {{pipelines["nier"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: depth
+          variant:
+            type: depth_anything_v3_streaming
+            max_res: 1280
+            fps: 15
+            chunk_size: 32
+            device: cuda
+            overlap: 8
+            loop_enable: false
+            save_depth_conf_result: true
+            delete_temp_files: true
+            align_lib: numba
     nier_depth_pro:
       metadata: {}
       input:
