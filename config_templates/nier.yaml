@@ -17,6 +17,8 @@ job:
             - type: trim
               start: 00:00:00
               end: 00:00:04
+        - type: interpolate
+          fps: 120
         - type: branch
           branches:
             - type: no_op

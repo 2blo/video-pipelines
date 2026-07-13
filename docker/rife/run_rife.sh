@@ -35,7 +35,7 @@ fi
 mkdir -p /opt/rife/train_log
 if [[ ! -f /opt/rife/train_log/flownet.pkl ]]; then
   echo "Downloading RIFE HD model..."
-  python3 -m gdown --fuzzy "https://drive.google.com/file/d/1APIzVeI-4ZZCEuIRE1m6WYfSCaOsi_7_/view?usp=sharing" -O /tmp/rife_hd.zip
+  python3 -m gdown "1APIzVeI-4ZZCEuIRE1m6WYfSCaOsi_7_" -O /tmp/rife_hd.zip
   unzip -o /tmp/rife_hd.zip -d /opt/rife/train_log
 
   if [[ -f /opt/rife/train_log/train_log/flownet.pkl ]]; then

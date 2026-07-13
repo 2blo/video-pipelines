@@ -32,7 +32,7 @@ CUDA_ARCH_LIST ?= all-major
 	install-cudss build-ceres build-colmap build-pycolmap build-all
 
 rife-image:
-	docker build -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
+	docker build --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
 
 rife-upscale:
 	@if [ -z "$(INPUT)" ] || [ -z "$(SCALE)" ] || [ -z "$(OUTPUT)" ]; then \
