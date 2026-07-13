@@ -6,22 +6,30 @@ shows: {}
 job:
   name: example_job
   pipelines:
-    4k_240fps:
+    current_best_template:
       metadata: {}
       input:
-        link: {{pipelines["4k_240fps"].input.link}}
+        link: {{pipelines["current_best_template"].input.link}}
       steps:
         - type: ffmpeg
           operations:
             - type: trim
-              start: 00:00:02
+              start: 00:00:00
               end: 00:00:04
+        - type: interpolate
+          fps: 120
+        - type: branch
+          branches:
+            - type: no_op
+            - type: depth
+              variant:
+                type: depth_crafter
+                max_megapixel_frames: 80
         - type: upscale
-          width: 2160
           variant:
             type: esrgan
-        - type: interpolate
-          fps: 240
+          width: 3840
+
 
     4k_seedvr2:
       metadata: {}

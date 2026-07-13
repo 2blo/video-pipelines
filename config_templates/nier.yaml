@@ -30,15 +30,3 @@ job:
           variant:
             type: esrgan
           width: 3840
-    nierinterpolate:
-      metadata: {}
-      input:
-        link: {{pipelines["nier"].input.link}}
-      steps:
-        - type: ffmpeg
-          operations:
-            - type: trim
-              start: 00:00:00
-              end: 00:00:04
-        - type: interpolate
-          fps: 120
