@@ -40,17 +40,16 @@ class Interpolate(BaseModel):
 
 class Upscale(BaseModel):
     type: Literal["upscale"]
+    width: int
     variant: "UpscaleVariant"
 
 
 class EsrganUpscaleVariant(BaseModel):
     type: Literal["esrgan"]
-    width: int
 
 
 class SeedVR2UpscaleVariant(BaseModel):
     type: Literal["seedvr2"]
-    width: int
     model: str = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
     batch_size: int = 5
     temporal_overlap: int = 3
@@ -94,15 +93,6 @@ class Colmap(BaseModel):
     extract_depth: bool = False
 
 
-class DepthAnythingV2(BaseModel):
-    type: Literal["depth_anything_v2"]
-    encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
-    input_size: int = 518
-    precision: Literal["fp32", "fp16"] = "fp32"
-    fast_resize_height: int | None = None
-    temporal_smoothing_alpha: float = 0.0
-
-
 class DepthAnythingV2Variant(BaseModel):
     type: Literal["depth_anything_v2"]
     encoder: Literal["vits", "vitb", "vitl", "vitg"] = "vitl"
@@ -122,7 +112,7 @@ class DepthAnythingV3StreamingVariant(BaseModel):
     type: Literal["depth_anything_v3_streaming"]
     max_res: int | None = None
     fps: float | None = None
-    device: Literal["auto", "cuda", "cpu"] = "auto"
+    device: Literal["auto", "cuda"] = "auto"
     chunk_size: int = 64
     overlap: int = 24
     loop_enable: bool = False
@@ -193,6 +183,10 @@ class Normals(BaseModel):
     variant: NormalsVariant
 
 
+class NoOp(BaseModel):
+    type: Literal["noop", "no_op"]
+
+
 class CopyTracks(BaseModel):
     type: Literal["copy_tracks"]
     source_path: str
@@ -206,8 +200,26 @@ class Ffmpeg(BaseModel):
     operations: List[FfmpegOperation]
 
 
+BranchStep = Annotated[
+    Ffmpeg | Interpolate | Upscale | Colmap | Depth | Normals | NoOp,
+    Field(discriminator="type"),
+]
+
+
+class Branch(BaseModel):
+    type: Literal["branch"]
+    branches: List[BranchStep]
+
+
 Step = Annotated[
-    Ffmpeg | Interpolate | Upscale | Colmap | DepthAnythingV2 | Depth | Normals,
+    Ffmpeg
+    | Interpolate
+    | Upscale
+    | Colmap
+    | Depth
+    | Normals
+    | NoOp
+    | Branch,
     Field(discriminator="type"),
 ]
 

@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import shutil
 import subprocess
 from argparse import ArgumentParser
@@ -42,9 +41,6 @@ def get_cuda_diagnostics() -> str:
 
 
 def validate_cuda_runtime(device: str) -> None:
-    if device == "cpu":
-        return
-
     try:
         import torch  # type: ignore[import-not-found]
         import torch.nn.functional as F  # type: ignore[import-not-found]
@@ -52,12 +48,10 @@ def validate_cuda_runtime(device: str) -> None:
         return
 
     if not torch.cuda.is_available():
-        if device == "cuda":
-            raise RuntimeError(
-                "device=cuda requested but torch.cuda.is_available() is false. "
-                f"Diagnostics: {get_cuda_diagnostics()}"
-            )
-        return
+        raise RuntimeError(
+            "CUDA is required for depth_anything_v3_streaming but torch.cuda.is_available() is false. "
+            f"Diagnostics: {get_cuda_diagnostics()}"
+        )
 
     try:
         x = torch.randn(1, 3, 32, 32, device="cuda", dtype=torch.float16)
@@ -286,92 +280,6 @@ def to_bool(value: int) -> bool:
     return value != 0
 
 
-def patch_da3_camera_pose_none_bug() -> None:
-    da3_path = Path("/opt/depth-anything-3/da3_streaming/da3_streaming.py")
-    if not da3_path.exists():
-        return
-
-    content = da3_path.read_text()
-    if (
-        "if pose is None:" in content
-        and "if intrinsic is None:" in content
-        and "position = pose[:3, 3]" not in content
-    ):
-        return
-
-    updated = content
-    old_pose = """                flat_pose = pose.flatten()"""
-    new_pose = """                if pose is None:
-                    continue
-                flat_pose = pose.flatten()"""
-    if old_pose in updated and "if pose is None:" not in updated:
-        updated = updated.replace(old_pose, new_pose, 1)
-
-    old_intrinsic = """                fx = intrinsic[0, 0]"""
-    new_intrinsic = """                if intrinsic is None:
-                    continue
-                fx = intrinsic[0, 0]"""
-    if old_intrinsic in updated and "if intrinsic is None:" not in updated:
-        updated = updated.replace(old_intrinsic, new_intrinsic, 1)
-
-    old_position = """                position = pose[:3, 3]"""
-    new_position = """                if pose is None:
-                    continue
-                position = pose[:3, 3]"""
-    if old_position in updated:
-        updated = updated.replace(old_position, new_position)
-
-    if updated != content:
-        da3_path.write_text(updated)
-
-
-def patch_disable_xformers_swiglu() -> None:
-    swiglu_path = Path(
-        "/opt/depth-anything-3/src/depth_anything_3/model/dinov2/layers/swiglu_ffn.py"
-    )
-    if not swiglu_path.exists():
-        return
-
-    content = swiglu_path.read_text()
-    marker = "XFORMERS_AVAILABLE = False"
-    if marker in content and "from xformers.ops import SwiGLU" not in content:
-        return
-
-    old_block = """try:
-    from xformers.ops import SwiGLU
-
-    XFORMERS_AVAILABLE = True
-except ImportError:
-    SwiGLU = SwiGLUFFN
-    XFORMERS_AVAILABLE = False
-"""
-
-    new_block = """SwiGLU = SwiGLUFFN
-XFORMERS_AVAILABLE = False
-"""
-
-    if old_block in content:
-        swiglu_path.write_text(content.replace(old_block, new_block, 1))
-
-
-def patch_da3_cuda_event_sync_bug() -> None:
-    da3_path = Path("/opt/depth-anything-3/da3_streaming/da3_streaming.py")
-    if not da3_path.exists():
-        return
-
-    content = da3_path.read_text()
-    if "end.record()" not in content:
-        return
-
-    updated, _ = re.subn(
-        r"(?m)^(?P<indent>[ \t]*)end\.record\(\)[ \t]*\n(?!\1torch\.cuda\.synchronize\(\)[ \t]*$)",
-        r"\g<indent>end.record()\n\g<indent>torch.cuda.synchronize()\n",
-        content,
-    )
-    if updated != content:
-        da3_path.write_text(updated)
-
-
 def run_da3_streaming(command: List[str], env: Dict[str, str]) -> None:
     subprocess.run(command, check=True, env=env)
 
@@ -383,7 +291,7 @@ def main() -> None:
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--max-res", type=int, default=640)
     parser.add_argument("--fps", type=float, default=5.0)
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cuda"], default="auto")
     parser.add_argument("--chunk-size", type=int, default=64)
     parser.add_argument("--overlap", type=int, default=24)
     parser.add_argument("--loop-enable", type=int, default=1)
@@ -443,23 +351,16 @@ def main() -> None:
         "--output_dir",
         str(output_dir),
     ]
-    patch_da3_camera_pose_none_bug()
-    patch_disable_xformers_swiglu()
-    patch_da3_cuda_event_sync_bug()
-
     env = os.environ.copy()
-    if args.device == "cpu":
-        env["CUDA_VISIBLE_DEVICES"] = ""
-    elif args.device in ["auto", "cuda"]:
-        env.setdefault(
-            "PYTORCH_CUDA_ALLOC_CONF",
-            "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8",
-        )
-        env.setdefault("CUDA_MODULE_LOADING", "EAGER")
-        env.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
-        print(f"[da3-streaming] CUDA preflight: {get_cuda_diagnostics()}")
-        if os.environ.get("VIDEO_PIPELINES_DA3_DEBUG_CUDA", "0") == "1":
-            env["CUDA_LAUNCH_BLOCKING"] = "1"
+    env.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8",
+    )
+    env.setdefault("CUDA_MODULE_LOADING", "EAGER")
+    env.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
+    print(f"[da3-streaming] CUDA preflight: {get_cuda_diagnostics()}")
+    if os.environ.get("VIDEO_PIPELINES_DA3_DEBUG_CUDA", "0") == "1":
+        env["CUDA_LAUNCH_BLOCKING"] = "1"
 
     try:
         run_da3_streaming(command, env)
@@ -469,15 +370,13 @@ def main() -> None:
             f"Exit code: {exc.returncode}",
             f"Command: {' '.join(command)}",
         ]
-        if args.device != "cpu":
-            details.append(
-                "Hint: this can be caused by unsupported CUDA kernels on your GPU. "
-                "Set device=cpu in the depth_anything_v3_streaming variant."
-            )
-            details.append(
-                "Hint: for CUDA OOM, reduce max_res, fps, chunk_size, or overlap in the "
-                "depth_anything_v3_streaming variant."
-            )
+        details.append(
+            "Hint: this can be caused by unsupported CUDA kernels on your GPU."
+        )
+        details.append(
+            "Hint: for CUDA OOM, reduce max_res, fps, chunk_size, or overlap in the "
+            "depth_anything_v3_streaming variant."
+        )
         raise RuntimeError("\n\n".join(details)) from exc
 
     if to_bool(args.save_depth_conf_result):

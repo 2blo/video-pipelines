@@ -25,17 +25,8 @@ def _checkpoint_repo_candidates(encoder: str) -> List[str]:
         "vits": ["depth-anything/Depth-Anything-V2-Small"],
         "vitb": ["depth-anything/Depth-Anything-V2-Base"],
         "vitl": ["depth-anything/Depth-Anything-V2-Large"],
-        # Giant is not publicly released yet; fall back to Large.
-        "vitg": ["depth-anything/Depth-Anything-V2-Giant", "depth-anything/Depth-Anything-V2-Large"],
     }
     return repo_by_encoder[encoder]
-
-
-def _effective_encoder(encoder: str, repo_id: str) -> str:
-    if encoder == "vitg" and repo_id == "depth-anything/Depth-Anything-V2-Large":
-        print("Requested encoder=vitg, but Giant checkpoint is unavailable. Falling back to vitl.")
-        return "vitl"
-    return encoder
 
 
 def _resolve_checkpoint(encoder: str, checkpoint_root: Path) -> tuple[Path, str]:
@@ -55,14 +46,13 @@ def _resolve_checkpoint(encoder: str, checkpoint_root: Path) -> tuple[Path, str]
     errors: List[str] = []
     for repo_id in _checkpoint_repo_candidates(encoder):
         try:
-            effective_encoder = _effective_encoder(encoder, repo_id)
-            effective_checkpoint_name = f"depth_anything_v2_{effective_encoder}.pth"
+            effective_checkpoint_name = f"depth_anything_v2_{encoder}.pth"
             resolved = hf_hub_download(
                 repo_id=repo_id,
                 filename=effective_checkpoint_name,
                 local_dir=str(checkpoint_root),
             )
-            return Path(resolved), effective_encoder
+            return Path(resolved), encoder
         except Exception as exc:
             errors.append(f"{repo_id}: {exc}")
 
@@ -77,7 +67,7 @@ def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("--input-video", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--encoder", choices=["vits", "vitb", "vitl", "vitg"], default="vitl")
+    parser.add_argument("--encoder", choices=["vits", "vitb", "vitl"], default="vitl")
     parser.add_argument("--input-size", type=int, default=518)
     parser.add_argument("--precision", choices=["fp32", "fp16"], default="fp32")
     parser.add_argument("--fast-resize-height", type=int, default=0)
@@ -100,7 +90,10 @@ def main() -> None:
     if args.temporal_smoothing_alpha < 0.0 or args.temporal_smoothing_alpha > 1.0:
         raise RuntimeError("temporal_smoothing_alpha must be in [0.0, 1.0]")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for Depth Anything V2 inference.")
+
+    device = "cuda"
     checkpoint_path, effective_encoder = _resolve_checkpoint(
         args.encoder, Path("/opt/depth-anything-v2/checkpoints")
     )
@@ -109,12 +102,9 @@ def main() -> None:
     model.load_state_dict(torch.load(str(checkpoint_path), map_location="cpu"))
     model = model.to(device).eval()
 
-    if args.precision == "fp16" and device == "cuda":
+    if args.precision == "fp16":
         model = model.half()
     else:
-        if args.precision == "fp16":
-            print("fp16 requested but CUDA is unavailable. Falling back to fp32.")
-            args.precision = "fp32"
         model = model.float()
 
     depth_maps_dir = output_dir / "depth_maps"
@@ -146,90 +136,51 @@ def main() -> None:
     supports_newheight_arg = "newHeight" in infer_sig.parameters
     supports_newwidth_arg = "newWidth" in infer_sig.parameters
 
-    fallback_sizes: List[int] = []
-    for candidate in [
-        args.input_size,
-        3072,
-        2560,
-        2048,
-        1536,
-        1280,
-        1024,
-        768,
-        518,
-    ]:
-        if candidate <= args.input_size and candidate > 0 and candidate not in fallback_sizes:
-            fallback_sizes.append(candidate)
+    def _infer_frame(frame: np.ndarray) -> np.ndarray:
+        infer_kwargs = {}
+        if supports_precision_arg:
+            infer_kwargs["precision"] = args.precision
 
-    def _is_oom_error(exc: Exception) -> bool:
-        message = str(exc).lower()
-        return "out of memory" in message or "cuda out of memory" in message
+        effective_size = args.input_size
+        if (
+            args.fast_resize_height > 0
+            and supports_newheight_arg
+            and supports_newwidth_arg
+        ):
+            frame_height_local, frame_width_local = frame.shape[:2]
+            aspect_ratio = frame_width_local / frame_height_local
+            target_height = args.fast_resize_height
+            target_width = round((target_height * aspect_ratio) / 14) * 14
+            target_width = max(14, (target_width // 14) * 14)
+            infer_kwargs["newHeight"] = target_height
+            infer_kwargs["newWidth"] = target_width
+            effective_size = min(effective_size, max(target_height, target_width))
 
-    def _infer_with_retry(frame: np.ndarray) -> np.ndarray:
-        last_exc: Exception | None = None
+        if args.precision == "fp16" and device == "cuda":
+            autocast_context = torch.autocast(device_type="cuda", dtype=torch.float16)
+        else:
+            autocast_context = torch.autocast(device_type="cpu", enabled=False)
 
-        for size_index, current_size in enumerate(fallback_sizes):
-            infer_kwargs = {}
-            if supports_precision_arg:
-                infer_kwargs["precision"] = args.precision
+        with autocast_context:
+            depth_pred = model.infer_image(frame, effective_size, **infer_kwargs)
 
-            effective_size = current_size
-            if (
-                args.fast_resize_height > 0
-                and supports_newheight_arg
-                and supports_newwidth_arg
-            ):
-                frame_height_local, frame_width_local = frame.shape[:2]
-                aspect_ratio = frame_width_local / frame_height_local
-                target_height = args.fast_resize_height
-                target_width = round((target_height * aspect_ratio) / 14) * 14
-                target_width = max(14, (target_width // 14) * 14)
-                infer_kwargs["newHeight"] = target_height
-                infer_kwargs["newWidth"] = target_width
-                effective_size = min(effective_size, max(target_height, target_width))
-
-            try:
-                if args.precision == "fp16" and device == "cuda":
-                    autocast_context = torch.autocast(device_type="cuda", dtype=torch.float16)
-                else:
-                    autocast_context = torch.autocast(device_type="cpu", enabled=False)
-
-                with autocast_context:
-                    depth_pred = model.infer_image(frame, effective_size, **infer_kwargs)
-
-                if isinstance(depth_pred, torch.Tensor):
-                    depth_pred = depth_pred.detach().float().cpu().numpy()
-                return depth_pred
-            except Exception as exc:
-                last_exc = exc
-                if not _is_oom_error(exc):
-                    raise
-
-                if device == "cuda":
-                    torch.cuda.empty_cache()
-
-                if size_index == len(fallback_sizes) - 1:
-                    raise RuntimeError(
-                        "Depth Anything V2 ran out of CUDA memory for all fallback inference sizes. "
-                        f"Tried sizes: {fallback_sizes}. Last error: {exc}"
-                    ) from exc
-
-                next_size = fallback_sizes[size_index + 1]
-                print(
-                    "Depth Anything V2 OOM at input_size="
-                    f"{effective_size}; retrying this frame with input_size={next_size}."
-                )
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Depth Anything V2 inference failed unexpectedly.")
+        if isinstance(depth_pred, torch.Tensor):
+            depth_pred = depth_pred.detach().float().cpu().numpy()
+        return depth_pred
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
 
-        depth = _infer_with_retry(frame)
+        try:
+            depth = _infer_frame(frame)
+        except Exception as exc:
+            raise RuntimeError(
+                "Depth Anything V2 inference failed. "
+                f"input_size={args.input_size}, precision={args.precision}. "
+                f"Original error: {exc}"
+            ) from exc
 
         depth_min = float(depth.min())
         depth_max = float(depth.max())

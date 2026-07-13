@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 11 ]]; then
-  echo "Usage: run_depth_anything_v3_streaming.sh <input_video> <output_dir> <max_res> <fps> <device:auto|cuda|cpu> <chunk_size> <overlap> <loop_enable:0|1> <save_depth_conf_result:0|1> <delete_temp_files:0|1> <align_lib>"
+  echo "Usage: run_depth_anything_v3_streaming.sh <input_video> <output_dir> <max_res> <fps> <device:auto|cuda> <chunk_size> <overlap> <loop_enable:0|1> <save_depth_conf_result:0|1> <delete_temp_files:0|1> <align_lib>"
   echo "Example: run_depth_anything_v3_streaming.sh /io/in/input.mp4 /io/out/depth_da3_stream 640 5 auto 120 60 1 1 1 triton"
   exit 1
 fi

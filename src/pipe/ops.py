@@ -15,7 +15,6 @@ from pipe.config import (
     DepthProVariant,
     CopyTracks,
     DktNormalsVariant,
-    DepthAnythingV2,
     DepthAnythingV2Variant,
     DepthAnythingV3StreamingVariant,
     DepthAnythingV3Variant,
@@ -951,23 +950,6 @@ def depth_anything_v2(
         json.dump(output, f, indent=2, sort_keys=True)
 
 
-def execute_depth_anything_v2(
-    step: DepthAnythingV2,
-    previous_step: ExecutedStep,
-    output_path: str,
-) -> ExecutedStep:
-    depth_anything_v2(
-        input_path=previous_step.output_path,
-        output_path=output_path,
-        encoder=step.encoder,
-        input_size=step.input_size,
-        precision=step.precision,
-        fast_resize_height=step.fast_resize_height,
-        temporal_smoothing_alpha=step.temporal_smoothing_alpha,
-    )
-    return ExecutedStep(output_path=output_path, extension=".json")
-
-
 def depth_anything_v3(
     input_path: str,
     output_path: str,
@@ -1126,10 +1108,10 @@ def depth_crafter(
         if nb_frames not in [None, "N/A"]:
             source_nb_frames = int(nb_frames)
     except Exception as exc:
-        if max_res is None or process_length is None or target_fps is None:
+        if max_res is None or target_fps is None:
             raise RuntimeError(
                 "Failed to derive DepthCrafter defaults from input footage. "
-                "Provide max_res/target_fps/process_length explicitly or ensure ffprobe metadata is available."
+                "Provide max_res/target_fps explicitly or ensure ffprobe metadata is available."
             ) from exc
 
     if max_res is None:
@@ -1143,7 +1125,7 @@ def depth_crafter(
         target_fps = max(1, int(round(source_fps)))
 
     if process_length is None:
-        process_length = source_nb_frames if source_nb_frames is not None else -1
+        process_length = -1
 
     if max_res <= 0:
         raise ValueError(
@@ -1386,30 +1368,10 @@ def depth_crafter(
                 chunk_path = _build_chunk_video(
                     start_frame_idx, end_frame_idx, chunk_stem
                 )
-                try:
-                    _run_depth_crafter_docker(
-                        input_video_path=chunk_path,
-                        process_length_for_run=-1,
-                    )
-                except RuntimeError as exc:
-                    frame_count = end_frame_idx - start_frame_idx
-                    if frame_count <= 1:
-                        raise RuntimeError(
-                            "DepthCrafter failed even for a single-frame chunk at configured "
-                            f"max_res={max_res}. Cannot keep this resolution for this model/runtime."
-                        ) from exc
-
-                    midpoint = start_frame_idx + (frame_count // 2)
-                    left_stem = f"{chunk_stem}a"
-                    right_stem = f"{chunk_stem}b"
-                    print(
-                        "DepthCrafter chunk failed; retrying by splitting range "
-                        f"[{start_frame_idx}, {end_frame_idx}) into "
-                        f"[{start_frame_idx}, {midpoint}) and [{midpoint}, {end_frame_idx})."
-                    )
-                    _run_chunk_range(start_frame_idx, midpoint, left_stem)
-                    _run_chunk_range(midpoint, end_frame_idx, right_stem)
-                    return
+                _run_depth_crafter_docker(
+                    input_video_path=chunk_path,
+                    process_length_for_run=-1,
+                )
 
                 chunk_stems.append(chunk_stem)
 
@@ -1576,8 +1538,8 @@ def depth_anything_v3_streaming(
             f"Unsupported align_lib={align_lib}. Use one of: triton, torch, numba, numpy."
         )
 
-    if device not in ["auto", "cuda", "cpu"]:
-        raise ValueError(f"Unsupported device={device}. Use one of: auto, cuda, cpu.")
+    if device not in ["auto", "cuda"]:
+        raise ValueError(f"Unsupported device={device}. Use one of: auto, cuda.")
 
     output_abs = os.path.abspath(output_path)
     output_dir = os.path.dirname(output_abs)
@@ -1732,17 +1694,7 @@ def depth_pro(
     metrics_npz_dir = os.path.join(depth_workspace_dir, "depth_npz")
 
     depth_image = os.environ.get("DEPTH_PRO_IMAGE", "video-pipelines-depth-pro:latest")
-    docker_gpu_args_env = os.environ.get("DOCKER_GPU_ARGS")
-    if docker_gpu_args_env is not None:
-        docker_gpu_args = shlex.split(docker_gpu_args_env)
-    else:
-        nvidia_smi_check = subprocess.run(
-            ["nvidia-smi"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        docker_gpu_args = ["--gpus", "all"] if nvidia_smi_check.returncode == 0 else []
+    docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DEPTH_PRO_MODEL_CACHE_DIR", ".cache/depth-pro")
     )
@@ -2031,38 +1983,7 @@ def normal_crafter(
         "--save-npz=True",
     ]
 
-    help_command: List[str] = [
-        "docker",
-        "run",
-        "--rm",
-        *docker_gpu_args,
-        "--entrypoint",
-        "python3",
-        normals_image,
-        "/opt/NormalCrafter/run.py",
-        "--help",
-    ]
-    decode_chunk_supported = False
-    try:
-        help_result = subprocess.run(
-            help_command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        decode_chunk_supported = "--decode-chunk-size" in (
-            (help_result.stdout or "") + (help_result.stderr or "")
-        )
-    except subprocess.CalledProcessError:
-        decode_chunk_supported = False
-
-    if decode_chunk_supported:
-        command.extend(["--decode-chunk-size", str(decode_chunk_size)])
-    else:
-        print(
-            "NormalCrafter run.py does not support --decode-chunk-size; "
-            "continuing without it."
-        )
+    command.extend(["--decode-chunk-size", str(decode_chunk_size)])
 
     print(f"Running NormalCrafter docker command: {shlex.join(command)}")
     try:
@@ -2598,11 +2519,12 @@ def _seedvr2_preflight_import_check(
 def upscale_seedvr2(
     input_path: str,
     output_path: str,
+    width: int,
     variant: SeedVR2UpscaleVariant,
 ) -> None:
-    if variant.width <= 0:
+    if width <= 0:
         raise ValueError(
-            f"Invalid upscale width={variant.width}. Width must be a positive integer."
+            f"Invalid upscale width={width}. Width must be a positive integer."
         )
 
     if variant.batch_size <= 0:
@@ -2630,12 +2552,12 @@ def upscale_seedvr2(
     os.makedirs(output_dir, exist_ok=True)
 
     input_width, input_height = _get_video_dimensions(input_abs)
-    if variant.width <= input_width:
+    if width <= input_width:
         raise ValueError(
-            f"Requested width={variant.width} is not larger than input width={input_width}."
+            f"Requested width={width} is not larger than input width={input_width}."
         )
 
-    scale = variant.width / input_width
+    scale = width / input_width
     input_short_side = min(input_width, input_height)
     target_short_side = max(2, int(round(input_short_side * scale)))
 
@@ -2733,7 +2655,7 @@ def upscale_seedvr2(
             f"Exit code: {exc.returncode}",
             f"Command: {shlex.join(command)}",
             f"Input dimensions: {input_width}x{input_height}",
-            f"Requested output width: {variant.width}",
+            f"Requested output width: {width}",
             f"Derived SeedVR2 short-side resolution: {target_short_side}",
         ]
         details.append(
@@ -2750,17 +2672,19 @@ def upscale_seedvr2(
 def execute_upscale(
     step: Upscale, previous_step: ExecutedStep, output_path: str
 ) -> ExecutedStep:
+    width = step.width
     variant = step.variant
     if isinstance(variant, EsrganUpscaleVariant):
         upscale_esrgan(
             input_path=previous_step.output_path,
             output_path=output_path,
-            width=variant.width,
+            width=width,
         )
     elif isinstance(variant, SeedVR2UpscaleVariant):
         upscale_seedvr2(
             input_path=previous_step.output_path,
             output_path=output_path,
+            width=width,
             variant=variant,
         )
     else:

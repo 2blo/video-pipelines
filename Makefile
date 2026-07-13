@@ -29,7 +29,7 @@ VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 CUDA_ARCH_LIST ?= all-major
 
 .PHONY: rife-image rife-upscale rife-example esrgan-image seedvr2-image esrgan-upscale depth-anything-v2-image depth-anything-v3-image depth-anything-v3-streaming-image depth-anything-v3-streaming-image-no-cache depth-crafter-image depth-pro-image normal-crafter-image dkt-normal-image clean-all cli \
-	install-cudss build-ceres build-colmap build-pycolmap build-colmap-cuda build-all
+	install-cudss build-ceres build-colmap build-pycolmap build-all
 
 rife-image:
 	docker build -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
@@ -134,8 +134,6 @@ clean-all:
 
 build-all: install-cudss build-ceres build-colmap build-pycolmap
 	@echo "Done. cuDSS-enabled pycolmap is installed into .venv"
-
-build-colmap-cuda: build-all
 
 install-cudss:
 	@echo "==> Installing cuDSS $(CUDSS_VERSION)"

@@ -99,8 +99,6 @@ OUTPUT_EXT="${OUTPUT_VIDEO##*.}"
 TMP_VIDEO="$WORK_DIR/video_tmp.${OUTPUT_EXT}"
 
 echo "Assembling output video..."
-
-set +e
 ffmpeg -hide_banner -loglevel warning -y \
   -thread_queue_size "$FFMPEG_THREAD_QUEUE_SIZE" -framerate "$FPS_RAW" -i "$FRAMES_UP/%08d.png" \
   -thread_queue_size "$FFMPEG_THREAD_QUEUE_SIZE" -i "$INPUT_VIDEO" \
@@ -109,20 +107,6 @@ ffmpeg -hide_banner -loglevel warning -y \
   -c:v libx264 -preset "$FFMPEG_X264_PRESET" -crf "$FFMPEG_X264_CRF" \
   -c:a copy -c:s copy \
   "$TMP_VIDEO"
-status=$?
-set -e
-
-if [[ "$status" -ne 0 ]]; then
-  echo "Subtitle copy/mux failed. Retrying without subtitles..."
-  ffmpeg -hide_banner -loglevel warning -y \
-    -thread_queue_size "$FFMPEG_THREAD_QUEUE_SIZE" -framerate "$FPS_RAW" -i "$FRAMES_UP/%08d.png" \
-    -thread_queue_size "$FFMPEG_THREAD_QUEUE_SIZE" -i "$INPUT_VIDEO" \
-    -map 0:v:0 -map 1:a? \
-    -vf "scale=${TARGET_WIDTH}:-2:flags=lanczos" \
-    -c:v libx264 -preset "$FFMPEG_X264_PRESET" -crf "$FFMPEG_X264_CRF" \
-    -c:a copy \
-    "$TMP_VIDEO"
-fi
 
 mv -f "$TMP_VIDEO" "$OUTPUT_VIDEO"
 

@@ -23,27 +23,23 @@ def _ensure_checkpoint(checkpoint_path: Path) -> None:
 
 def _resolve_precision(requested: str, device: torch.device) -> torch.dtype:
     if requested == "fp16":
-        if device.type == "cuda":
-            return torch.float16
-        print("Requested fp16, but CUDA is unavailable. Falling back to fp32.")
-        return torch.float32
+        return torch.float16
     return torch.float32
 
 
 def _resolve_device() -> torch.device:
     if not torch.cuda.is_available():
-        return torch.device("cpu")
+        raise RuntimeError("CUDA is required for Depth Pro inference.")
 
     try:
         # Probe one tiny kernel to catch "no kernel image is available" at startup.
         _ = (torch.zeros(1, device="cuda") + 1).item()
         return torch.device("cuda:0")
     except Exception as exc:
-        print(
-            "CUDA is visible but not usable by this PyTorch build; falling back to CPU. "
+        raise RuntimeError(
+            "CUDA is visible but not usable by this PyTorch build. "
             f"Reason: {exc}"
-        )
-        return torch.device("cpu")
+        ) from exc
 
 
 def _load_model(dtype: torch.dtype, device: torch.device):

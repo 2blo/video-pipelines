@@ -17,9 +17,9 @@ job:
               start: 00:00:02
               end: 00:00:04
         - type: upscale
+          width: 2160
           variant:
             type: esrgan
-            width: 2160
         - type: interpolate
           fps: 240
 
@@ -34,9 +34,9 @@ job:
               start: 00:00:02
               end: 00:00:04
         - type: upscale
+          width: 3840
           variant:
             type: seedvr2
-            width: 3840
             model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
             batch_size: 5
             temporal_overlap: 3
@@ -61,10 +61,10 @@ job:
         link: {{pipelines["4k_seedv3_full"].input.link}}
       steps:
         - type: upscale
+          width: 3840
           variant:
             # "seedv3" requested; current integrated backend is SeedVR2.
             type: seedvr2
-            width: 3840
             model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
             batch_size: 5
             temporal_overlap: 3

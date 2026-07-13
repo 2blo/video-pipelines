@@ -11,14 +11,15 @@ import jinja2
 import yaml
 from pipe.chart import Chart
 from pipe.config import (
+    Branch,
     Colmap,
     Config,
     Depth,
-    DepthAnythingV2,
     Episode,
     Ffmpeg,
     Interpolate,
     ManualDownload,
+    NoOp,
     Normals,
     Path,
     Upscale,
@@ -27,7 +28,6 @@ from pipe.ops import (
     ExecutedStep,
     execute_colmap,
     execute_depth,
-    execute_depth_anything_v2,
     execute_ffmpeg,
     execute_interpolate,
     execute_manual_download,
@@ -60,6 +60,11 @@ class MediaFileInfo(BaseModel):
     frame_count: int | None
     sha256: str | None
     metadata_text: str | None
+
+
+class BranchState(BaseModel):
+    name: str
+    previous_step: ExecutedStep
 
 
 def _safe_int(value: object) -> int | None:
@@ -406,6 +411,73 @@ def get_pipeline_artifact_dir(config: Config, pipeline_name: str) -> str:
     return os.path.join(config.artifact_dir, config.job.name, pipeline_name)
 
 
+def _sanitize_branch_label(raw_label: str) -> str:
+    sanitized = "".join(
+        char if char.isalnum() or char in ["_", "-"] else "_" for char in raw_label
+    )
+    sanitized = sanitized.strip("_")
+    return sanitized if sanitized else "branch"
+
+
+def _get_step_output_extension(step: object, previous_extension: str) -> str:
+    if isinstance(step, Ffmpeg):
+        return get_ffmpeg_step_extension(step, previous_extension)
+    if isinstance(step, Colmap | Depth | Normals):
+        return ".json"
+    return previous_extension
+
+
+def _execute_single_step(
+    *,
+    step: BaseModel,
+    previous_step: ExecutedStep,
+    output_path: str,
+) -> ExecutedStep:
+    if isinstance(step, Ffmpeg):
+        return execute_ffmpeg(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, Interpolate):
+        return execute_interpolate(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, Upscale):
+        return execute_upscale(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, Colmap):
+        return execute_colmap(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, Depth):
+        return execute_depth(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, Normals):
+        return execute_normals(
+            step=step,
+            previous_step=previous_step,
+            output_path=output_path,
+        )
+    if isinstance(step, NoOp):
+        return ExecutedStep(
+            output_path=previous_step.output_path,
+            extension=previous_step.extension,
+        )
+
+    raise ValueError(f"Unsupported step type: {type(step).__name__}")
+
+
 def resolve_initial_step(
     config: Config,
     pipeline_name: str,
@@ -490,11 +562,14 @@ def run_config(
             pipeline_dir = get_pipeline_artifact_dir(config, pipeline_name)
             os.makedirs(pipeline_dir, exist_ok=True)
 
-            previous_step = resolve_initial_step(
+            initial_step = resolve_initial_step(
                 config=config,
                 pipeline_name=pipeline_name,
                 input_step=pipeline.input,
             )
+            active_branches: List[BranchState] = [
+                BranchState(name="main", previous_step=initial_step)
+            ]
 
             total_n_steps = len(pipeline.steps)
             pipeline_metadata_json = json.dumps(pipeline.metadata, sort_keys=True)
@@ -506,223 +581,253 @@ def run_config(
             for step_index, step in enumerate(pipeline.steps):
                 is_last_step = step_index == (total_n_steps - 1)
                 is_last_pipeline = pipeline_index == (n_pipelines - 1)
-                step_type = step.type
-                step_json = json.dumps(step.model_dump(mode="json"), sort_keys=True)
-                if isinstance(step, Ffmpeg):
-                    output_extension = get_ffmpeg_step_extension(
-                        step, previous_step.extension
-                    )
-                elif isinstance(step, Colmap | DepthAnythingV2 | Depth | Normals):
-                    output_extension = ".json"
+
+                if isinstance(step, Branch):
+                    if not step.branches:
+                        raise ValueError("Branch step requires at least one branch.")
+
+                    expanded_work: List[tuple[str, str, BaseModel, ExecutedStep]] = []
+                    for parent_branch in active_branches:
+                        next_labels: set[str] = set()
+                        for branch_index, branch_step in enumerate(step.branches):
+                            candidate_label = _sanitize_branch_label(
+                                f"{parent_branch.name}_{branch_index}_{branch_step.type}"
+                            )
+                            if candidate_label in next_labels:
+                                raise ValueError(
+                                    "Duplicate branch labels generated by branch step. "
+                                    f"Branch name collision at '{candidate_label}'."
+                                )
+                            next_labels.add(candidate_label)
+                            expanded_work.append(
+                                (
+                                    candidate_label,
+                                    f"branch:{branch_step.type}",
+                                    branch_step,
+                                    parent_branch.previous_step,
+                                )
+                            )
                 else:
-                    output_extension = previous_step.extension
-                filename = (
-                    f"{pipeline_name}_step_{step_index}_{step.__class__.__name__}"
-                    f"{output_extension}"
-                )
+                    expanded_work = [
+                        (
+                            branch_state.name,
+                            step.type,
+                            step,
+                            branch_state.previous_step,
+                        )
+                        for branch_state in active_branches
+                    ]
 
-                if is_last_step:
-                    os.makedirs(config.output_dir, exist_ok=True)
-                    intended_output = os.path.join(
-                        config.output_dir,
-                        f"{pipeline_name}{output_extension}",
+                next_active_branches: List[BranchState] = []
+                for (
+                    branch_label,
+                    step_type,
+                    concrete_step,
+                    branch_previous_step,
+                ) in expanded_work:
+                    output_extension = _get_step_output_extension(
+                        concrete_step,
+                        branch_previous_step.extension,
                     )
-                else:
-                    intended_output = os.path.join(pipeline_dir, filename)
 
-                start_ts = utc_now()
-                start_file_info = probe_media_file_info(
-                    intended_output, include_hash=False
-                )
-                logger.log_step_event(
-                    event_timestamp=start_ts,
-                    chart_path=chart_path,
-                    chart_json=chart_json,
-                    rendered_config_json=rendered,
-                    job_name=config.job.name,
-                    pipeline_index=pipeline_index,
-                    n_pipelines=n_pipelines,
-                    job_end_timestamp=None,
-                    pipeline_name=pipeline_name,
-                    pipeline_metadata_json=pipeline_metadata_json,
-                    pipeline_input_json=pipeline_input_json,
-                    total_n_steps=total_n_steps,
-                    pipeline_start_timestamp=pipeline_start_timestamp,
-                    pipeline_end_timestamp=None,
-                    step_index=step_index,
-                    step_type=step_type,
-                    step_json=step_json,
-                    step_event="start",
-                    step_start_timestamp=start_ts,
-                    step_end_timestamp=None,
-                    job_start_timestamp=job_start_timestamp,
-                    file_info=start_file_info,
-                    error_message=None,
-                )
-
-                if not config.full_refresh and os.path.exists(intended_output):
-                    existing_file_info = probe_media_file_info(
-                        intended_output,
-                        include_hash=True,
-                    )
-                    existing_output_hash = existing_file_info.sha256
-                    if existing_output_hash is None:
-                        existing_output_hash = hash_file_sha256(intended_output)
-                    should_skip = logger.should_skip_step(
-                        job_name=config.job.name,
-                        pipeline_name=pipeline_name,
-                        step_index=step_index,
-                        step_json=step_json,
-                        output_file_hash=existing_output_hash,
-                    )
-                    if should_skip:
-                        skip_ts = utc_now()
-                        pipeline_end_timestamp = skip_ts if is_last_step else None
-                        job_end_timestamp = (
-                            skip_ts if is_last_step and is_last_pipeline else None
-                        )
-                        logger.log_step_event(
-                            event_timestamp=skip_ts,
-                            chart_path=chart_path,
-                            chart_json=chart_json,
-                            rendered_config_json=rendered,
-                            job_name=config.job.name,
-                            pipeline_index=pipeline_index,
-                            n_pipelines=n_pipelines,
-                            job_end_timestamp=job_end_timestamp,
-                            pipeline_name=pipeline_name,
-                            pipeline_metadata_json=pipeline_metadata_json,
-                            pipeline_input_json=pipeline_input_json,
-                            total_n_steps=total_n_steps,
-                            pipeline_start_timestamp=pipeline_start_timestamp,
-                            pipeline_end_timestamp=pipeline_end_timestamp,
-                            step_index=step_index,
-                            step_type=step_type,
-                            step_json=step_json,
-                            step_event="skipped",
-                            step_start_timestamp=start_ts,
-                            step_end_timestamp=skip_ts,
-                            job_start_timestamp=job_start_timestamp,
-                            file_info=existing_file_info,
-                            error_message=None,
-                        )
-                        previous_step = ExecutedStep(
-                            output_path=intended_output,
-                            extension=output_extension,
-                        )
-                        continue
-
-                try:
-                    if isinstance(step, Ffmpeg):
-                        previous_step = execute_ffmpeg(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Interpolate):
-                        previous_step = execute_interpolate(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Upscale):
-                        previous_step = execute_upscale(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Colmap):
-                        previous_step = execute_colmap(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, DepthAnythingV2):
-                        previous_step = execute_depth_anything_v2(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Depth):
-                        previous_step = execute_depth(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
-                    elif isinstance(step, Normals):
-                        previous_step = execute_normals(
-                            step=step,
-                            previous_step=previous_step,
-                            output_path=intended_output,
-                        )
+                    if is_last_step:
+                        os.makedirs(config.output_dir, exist_ok=True)
+                        if len(expanded_work) == 1 and branch_label == "main":
+                            intended_output = os.path.join(
+                                config.output_dir,
+                                f"{pipeline_name}{output_extension}",
+                            )
+                        else:
+                            intended_output = os.path.join(
+                                config.output_dir,
+                                f"{pipeline_name}__{branch_label}{output_extension}",
+                            )
                     else:
-                        raise ValueError(f"Unsupported step type: {step_type}")
-                except Exception as exc:
-                    failed_ts = utc_now()
-                    failed_file_info = probe_media_file_info(
+                        if branch_label == "main":
+                            filename = (
+                                f"{pipeline_name}_step_{step_index}_{concrete_step.__class__.__name__}"
+                                f"{output_extension}"
+                            )
+                        else:
+                            filename = (
+                                f"{pipeline_name}_step_{step_index}_{branch_label}_"
+                                f"{concrete_step.__class__.__name__}{output_extension}"
+                            )
+                        intended_output = os.path.join(pipeline_dir, filename)
+
+                    step_json = json.dumps(
+                        {
+                            "branch": branch_label,
+                            "step": concrete_step.model_dump(mode="json"),
+                        },
+                        sort_keys=True,
+                    )
+
+                    start_ts = utc_now()
+                    start_file_info = probe_media_file_info(
                         intended_output, include_hash=False
                     )
                     logger.log_step_event(
-                        event_timestamp=failed_ts,
+                        event_timestamp=start_ts,
                         chart_path=chart_path,
                         chart_json=chart_json,
                         rendered_config_json=rendered,
                         job_name=config.job.name,
                         pipeline_index=pipeline_index,
                         n_pipelines=n_pipelines,
-                        job_end_timestamp=failed_ts,
+                        job_end_timestamp=None,
                         pipeline_name=pipeline_name,
                         pipeline_metadata_json=pipeline_metadata_json,
                         pipeline_input_json=pipeline_input_json,
                         total_n_steps=total_n_steps,
                         pipeline_start_timestamp=pipeline_start_timestamp,
-                        pipeline_end_timestamp=failed_ts,
+                        pipeline_end_timestamp=None,
                         step_index=step_index,
                         step_type=step_type,
                         step_json=step_json,
-                        step_event="failed",
+                        step_event="start",
                         step_start_timestamp=start_ts,
-                        step_end_timestamp=failed_ts,
+                        step_end_timestamp=None,
                         job_start_timestamp=job_start_timestamp,
-                        file_info=failed_file_info,
-                        error_message=str(exc),
+                        file_info=start_file_info,
+                        error_message=None,
                     )
-                    raise
 
-                completed_ts = utc_now()
-                completed_file_info = probe_media_file_info(
-                    previous_step.output_path,
-                    include_hash=True,
-                )
-                pipeline_end_timestamp = completed_ts if is_last_step else None
-                job_end_timestamp = (
-                    completed_ts if is_last_step and is_last_pipeline else None
-                )
-                logger.log_step_event(
-                    event_timestamp=completed_ts,
-                    chart_path=chart_path,
-                    chart_json=chart_json,
-                    rendered_config_json=rendered,
-                    job_name=config.job.name,
-                    pipeline_index=pipeline_index,
-                    n_pipelines=n_pipelines,
-                    job_end_timestamp=job_end_timestamp,
-                    pipeline_name=pipeline_name,
-                    pipeline_metadata_json=pipeline_metadata_json,
-                    pipeline_input_json=pipeline_input_json,
-                    total_n_steps=total_n_steps,
-                    pipeline_start_timestamp=pipeline_start_timestamp,
-                    pipeline_end_timestamp=pipeline_end_timestamp,
-                    step_index=step_index,
-                    step_type=step_type,
-                    step_json=step_json,
-                    step_event="completed",
-                    step_start_timestamp=start_ts,
-                    step_end_timestamp=completed_ts,
-                    job_start_timestamp=job_start_timestamp,
-                    file_info=completed_file_info,
-                    error_message=None,
-                )
+                    if not config.full_refresh and os.path.exists(intended_output):
+                        existing_file_info = probe_media_file_info(
+                            intended_output,
+                            include_hash=True,
+                        )
+                        existing_output_hash = existing_file_info.sha256
+                        if existing_output_hash is None:
+                            existing_output_hash = hash_file_sha256(intended_output)
+                        should_skip = logger.should_skip_step(
+                            job_name=config.job.name,
+                            pipeline_name=pipeline_name,
+                            step_index=step_index,
+                            step_json=step_json,
+                            output_file_hash=existing_output_hash,
+                        )
+                        if should_skip:
+                            skip_ts = utc_now()
+                            pipeline_end_timestamp = skip_ts if is_last_step else None
+                            job_end_timestamp = (
+                                skip_ts if is_last_step and is_last_pipeline else None
+                            )
+                            logger.log_step_event(
+                                event_timestamp=skip_ts,
+                                chart_path=chart_path,
+                                chart_json=chart_json,
+                                rendered_config_json=rendered,
+                                job_name=config.job.name,
+                                pipeline_index=pipeline_index,
+                                n_pipelines=n_pipelines,
+                                job_end_timestamp=job_end_timestamp,
+                                pipeline_name=pipeline_name,
+                                pipeline_metadata_json=pipeline_metadata_json,
+                                pipeline_input_json=pipeline_input_json,
+                                total_n_steps=total_n_steps,
+                                pipeline_start_timestamp=pipeline_start_timestamp,
+                                pipeline_end_timestamp=pipeline_end_timestamp,
+                                step_index=step_index,
+                                step_type=step_type,
+                                step_json=step_json,
+                                step_event="skipped",
+                                step_start_timestamp=start_ts,
+                                step_end_timestamp=skip_ts,
+                                job_start_timestamp=job_start_timestamp,
+                                file_info=existing_file_info,
+                                error_message=None,
+                            )
+                            next_active_branches.append(
+                                BranchState(
+                                    name=branch_label,
+                                    previous_step=ExecutedStep(
+                                        output_path=intended_output,
+                                        extension=output_extension,
+                                    ),
+                                )
+                            )
+                            continue
+
+                    try:
+                        executed_step = _execute_single_step(
+                            step=concrete_step,
+                            previous_step=branch_previous_step,
+                            output_path=intended_output,
+                        )
+                    except Exception as exc:
+                        failed_ts = utc_now()
+                        failed_file_info = probe_media_file_info(
+                            intended_output, include_hash=False
+                        )
+                        logger.log_step_event(
+                            event_timestamp=failed_ts,
+                            chart_path=chart_path,
+                            chart_json=chart_json,
+                            rendered_config_json=rendered,
+                            job_name=config.job.name,
+                            pipeline_index=pipeline_index,
+                            n_pipelines=n_pipelines,
+                            job_end_timestamp=failed_ts,
+                            pipeline_name=pipeline_name,
+                            pipeline_metadata_json=pipeline_metadata_json,
+                            pipeline_input_json=pipeline_input_json,
+                            total_n_steps=total_n_steps,
+                            pipeline_start_timestamp=pipeline_start_timestamp,
+                            pipeline_end_timestamp=failed_ts,
+                            step_index=step_index,
+                            step_type=step_type,
+                            step_json=step_json,
+                            step_event="failed",
+                            step_start_timestamp=start_ts,
+                            step_end_timestamp=failed_ts,
+                            job_start_timestamp=job_start_timestamp,
+                            file_info=failed_file_info,
+                            error_message=str(exc),
+                        )
+                        raise
+
+                    completed_ts = utc_now()
+                    completed_file_info = probe_media_file_info(
+                        executed_step.output_path,
+                        include_hash=True,
+                    )
+                    pipeline_end_timestamp = completed_ts if is_last_step else None
+                    job_end_timestamp = (
+                        completed_ts if is_last_step and is_last_pipeline else None
+                    )
+                    logger.log_step_event(
+                        event_timestamp=completed_ts,
+                        chart_path=chart_path,
+                        chart_json=chart_json,
+                        rendered_config_json=rendered,
+                        job_name=config.job.name,
+                        pipeline_index=pipeline_index,
+                        n_pipelines=n_pipelines,
+                        job_end_timestamp=job_end_timestamp,
+                        pipeline_name=pipeline_name,
+                        pipeline_metadata_json=pipeline_metadata_json,
+                        pipeline_input_json=pipeline_input_json,
+                        total_n_steps=total_n_steps,
+                        pipeline_start_timestamp=pipeline_start_timestamp,
+                        pipeline_end_timestamp=pipeline_end_timestamp,
+                        step_index=step_index,
+                        step_type=step_type,
+                        step_json=step_json,
+                        step_event="completed",
+                        step_start_timestamp=start_ts,
+                        step_end_timestamp=completed_ts,
+                        job_start_timestamp=job_start_timestamp,
+                        file_info=completed_file_info,
+                        error_message=None,
+                    )
+
+                    next_active_branches.append(
+                        BranchState(name=branch_label, previous_step=executed_step)
+                    )
+
+                active_branches = next_active_branches
     finally:
         logger.close()
 

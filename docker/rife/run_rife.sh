@@ -56,19 +56,7 @@ TMP_OUT="$(dirname "$OUTPUT_VIDEO")/.rife_tmp_$(basename "$OUTPUT_VIDEO")"
 TMP_LOG="/tmp/rife_run.log"
 
 cd /opt/rife
-set +e
 python3 inference_video.py --video="$INPUT_VIDEO" --exp="$exp" --output="$TMP_OUT" 2>&1 | tee "$TMP_LOG"
-status=${PIPESTATUS[0]}
-set -e
-
-if [[ "$status" -ne 0 ]]; then
-  if grep -q "no kernel image is available for execution on the device" "$TMP_LOG"; then
-    echo "CUDA binary is not compatible with this GPU yet. Falling back to CPU."
-    CUDA_VISIBLE_DEVICES="" python3 inference_video.py --video="$INPUT_VIDEO" --exp="$exp" --output="$TMP_OUT"
-  else
-    exit "$status"
-  fi
-fi
 
 mv -f "$TMP_OUT" "$OUTPUT_VIDEO"
 
