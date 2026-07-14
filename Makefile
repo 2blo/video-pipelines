@@ -28,100 +28,9 @@ COLMAP_VERSION ?= 4.0.3
 VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 CUDA_ARCH_LIST ?= all-major
 
-.PHONY: rife-image rife-upscale rife-example esrgan-image seedvr2-image esrgan-upscale depth-anything-v2-image depth-anything-v3-image depth-anything-v3-streaming-image depth-anything-v3-streaming-image-no-cache depth-crafter-image depth-pro-image normal-crafter-image dkt-normal-image clean-all cli \
+
+.PHONY: clean-all cli \
 	install-cudss build-ceres build-colmap build-pycolmap build-all
-
-rife-image:
-	docker build --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(RIFE_IMAGE) -f docker/rife/Dockerfile .
-
-rife-upscale:
-	@if [ -z "$(INPUT)" ] || [ -z "$(SCALE)" ] || [ -z "$(OUTPUT)" ]; then \
-		echo "Usage: make rife-upscale INPUT=/path/in.mp4 SCALE=2 OUTPUT=/path/out.mp4"; \
-		exit 1; \
-	fi
-	@if ! docker image inspect "$(RIFE_IMAGE)" >/dev/null 2>&1; then \
-		$(MAKE) rife-image; \
-	fi
-	@in_abs="$$(realpath -m "$(INPUT)")"; \
-	out_abs="$$(realpath -m "$(OUTPUT)")"; \
-	in_dir="$$(dirname "$$in_abs")"; \
-	out_dir="$$(dirname "$$out_abs")"; \
-	cache_dir="$$(realpath -m "$(RIFE_MODEL_CACHE_DIR)")"; \
-	mkdir -p "$$cache_dir"; \
-	mkdir -p "$$out_dir"; \
-	docker run --rm $(DOCKER_GPU_ARGS) \
-		-v "$$in_dir:/io/in:ro" \
-		-v "$$out_dir:/io/out" \
-		-v "$$cache_dir:/opt/rife/train_log" \
-		$(RIFE_IMAGE) \
-		"/io/in/$$(basename "$$in_abs")" \
-		"$(SCALE)" \
-		"/io/out/$$(basename "$$out_abs")"
-
-rife-example: rife-image
-	@mkdir -p sandbox/inputs sandbox/outputs
-	@docker run --rm --entrypoint ffmpeg \
-		-v "$(CURDIR)/sandbox/inputs:/io" \
-		$(RIFE_IMAGE) \
-		-y -f lavfi -i testsrc=size=1280x720:rate=24 -t 3 -pix_fmt yuv420p /io/example.mp4
-	@$(MAKE) rife-upscale \
-		INPUT="$(CURDIR)/sandbox/inputs/example.mp4" \
-		SCALE=2 \
-		OUTPUT="$(CURDIR)/sandbox/outputs/example_2x.mp4"
-
-esrgan-image:
-	docker build -t $(ESRGAN_IMAGE) -f docker/esrgan/Dockerfile .
-
-seedvr2-image:
-	docker build -t $(SEEDVR2_IMAGE) -f docker/seedvr2/Dockerfile .
-
-depth-anything-v2-image:
-	docker build -t $(DEPTH_ANYTHING_V2_IMAGE) -f docker/depth_anything_v2/Dockerfile .
-
-depth-anything-v3-image:
-	docker build -t $(DEPTH_ANYTHING_V3_IMAGE) -f docker/depth_anything_v3/Dockerfile .
-
-depth-anything-v3-streaming-image:
-	docker build --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(DEPTH_ANYTHING_V3_STREAMING_IMAGE) -f docker/depth_anything_v3_streaming/Dockerfile .
-
-depth-anything-v3-streaming-image-no-cache:
-	docker build --no-cache --build-arg TORCH_CHANNELS="$(TORCH_CHANNELS)" -t $(DEPTH_ANYTHING_V3_STREAMING_IMAGE) -f docker/depth_anything_v3_streaming/Dockerfile .
-
-depth-crafter-image:
-	docker build -t $(DEPTH_CRAFTER_IMAGE) -f docker/depth_crafter/Dockerfile .
-
-depth-pro-image:
-	docker build -t $(DEPTH_PRO_IMAGE) -f docker/depth_pro/Dockerfile .
-
-normal-crafter-image:
-	docker build -t $(NORMAL_CRAFTER_IMAGE) -f docker/normal_crafter/Dockerfile .
-
-dkt-normal-image:
-	docker build -t $(DKT_NORMAL_IMAGE) -f docker/dkt_normal/Dockerfile .
-
-esrgan-upscale:
-	@if [ -z "$(INPUT)" ] || [ -z "$(WIDTH)" ] || [ -z "$(OUTPUT)" ]; then \
-		echo "Usage: make esrgan-upscale INPUT=/path/in.mp4 WIDTH=2160 OUTPUT=/path/out.mkv"; \
-		exit 1; \
-	fi
-	@if ! docker image inspect "$(ESRGAN_IMAGE)" >/dev/null 2>&1; then \
-		$(MAKE) esrgan-image; \
-	fi
-	@in_abs="$$(realpath -m "$(INPUT)")"; \
-	out_abs="$$(realpath -m "$(OUTPUT)")"; \
-	in_dir="$$(dirname "$$in_abs")"; \
-	out_dir="$$(dirname "$$out_abs")"; \
-	cache_dir="$$(realpath -m "$(ESRGAN_MODEL_CACHE_DIR)")"; \
-	mkdir -p "$$cache_dir"; \
-	mkdir -p "$$out_dir"; \
-	docker run --rm $(DOCKER_GPU_ARGS) \
-		-v "$$in_dir:/io/in:ro" \
-		-v "$$out_dir:/io/out" \
-		-v "$$cache_dir:/opt/esrgan/models" \
-		$(ESRGAN_IMAGE) \
-		"/io/in/$$(basename "$$in_abs")" \
-		"$(WIDTH)" \
-		"/io/out/$$(basename "$$out_abs")"
 
 clean-all:
 	rm -rf "$(ARTIFACT_DIR)"
@@ -201,9 +110,14 @@ build-pycolmap: build-colmap
 		"$(VENV_PYTHON)" -m pip install "$(BUILD_DIR)/colmap" \
 		--config-settings=cmake.args="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc;-DCUDA_ENABLED=ON;-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCH_LIST);-DCUDA_ARCHS=$(CUDA_ARCH_LIST)"
 
+CLI_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+
 cli:
 	@if [ ! -x "$(VENV_PYTHON)" ]; then \
 		echo "Virtualenv not found at $(VENV_PYTHON). Running uv sync once..."; \
 		uv sync; \
 	fi
-	"$(VENV_PYTHON)" src/pipe/cli.py
+	"$(VENV_PYTHON)" src/pipe/cli.py $(CLI_ARGS)
+
+%:
+	@:

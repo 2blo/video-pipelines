@@ -19,21 +19,16 @@ from pipe.config import (
     Ffmpeg,
     Interpolate,
     ManualDownload,
-    NoOp,
     Normals,
     Path,
     Upscale,
 )
 from pipe.ops import (
     ExecutedStep,
-    execute_colmap,
-    execute_depth,
-    execute_ffmpeg,
-    execute_interpolate,
+    build_operation,
     execute_manual_download,
-    execute_normals,
     get_ffmpeg_step_extension,
-    execute_upscale,
+    resolve_video_extension_from_step_output,
 )
 from pydantic import BaseModel
 
@@ -419,11 +414,17 @@ def _sanitize_branch_label(raw_label: str) -> str:
     return sanitized if sanitized else "branch"
 
 
-def _get_step_output_extension(step: object, previous_extension: str) -> str:
+def _get_step_output_extension(
+    step: object,
+    previous_extension: str,
+    previous_output_path: str,
+) -> str:
     if isinstance(step, Ffmpeg):
         return get_ffmpeg_step_extension(step, previous_extension)
     if isinstance(step, Colmap | Depth | Normals):
         return ".json"
+    if isinstance(step, Interpolate | Upscale) and previous_extension == ".json":
+        return resolve_video_extension_from_step_output(previous_output_path)
     return previous_extension
 
 
@@ -433,49 +434,23 @@ def _execute_single_step(
     previous_step: ExecutedStep,
     output_path: str,
 ) -> ExecutedStep:
-    if isinstance(step, Ffmpeg):
-        return execute_ffmpeg(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, Interpolate):
-        return execute_interpolate(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, Upscale):
-        return execute_upscale(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, Colmap):
-        return execute_colmap(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, Depth):
-        return execute_depth(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, Normals):
-        return execute_normals(
-            step=step,
-            previous_step=previous_step,
-            output_path=output_path,
-        )
-    if isinstance(step, NoOp):
-        return ExecutedStep(
-            output_path=previous_step.output_path,
-            extension=previous_step.extension,
-        )
+    operation = build_operation(step)
+    return operation.run(
+        step=step,
+        previous_step=previous_step,
+        output_path=output_path,
+    )
 
-    raise ValueError(f"Unsupported step type: {type(step).__name__}")
+
+def kill_all_step_operations(config: Config) -> None:
+    for _, pipeline in config.job.pipelines.items():
+        for step in pipeline.steps:
+            if isinstance(step, Branch):
+                for branch_step in step.branches:
+                    build_operation(branch_step).kill(branch_step)
+                continue
+
+            build_operation(step).kill(step)
 
 
 def resolve_initial_step(
@@ -628,18 +603,23 @@ def run_config(
                     output_extension = _get_step_output_extension(
                         concrete_step,
                         branch_previous_step.extension,
+                        branch_previous_step.output_path,
                     )
 
                     if is_last_step:
-                        os.makedirs(config.output_dir, exist_ok=True)
+                        pipeline_output_dir = os.path.join(
+                            config.output_dir,
+                            pipeline_name,
+                        )
+                        os.makedirs(pipeline_output_dir, exist_ok=True)
                         if len(expanded_work) == 1 and branch_label == "main":
                             intended_output = os.path.join(
-                                config.output_dir,
+                                pipeline_output_dir,
                                 f"{pipeline_name}{output_extension}",
                             )
                         else:
                             intended_output = os.path.join(
-                                config.output_dir,
+                                pipeline_output_dir,
                                 f"{pipeline_name}__{branch_label}{output_extension}",
                             )
                     else:

@@ -24,7 +24,8 @@ job:
             - type: depth
               variant:
                 type: depth_crafter
-                max_megapixel_frames: 80
+                max_res: 1080
+                max_megapixel_frames: 30
         - type: upscale
           variant:
             type: esrgan

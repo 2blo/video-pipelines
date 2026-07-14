@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import webbrowser
 from time import sleep
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from pipe.config import (
     Colmap,
@@ -24,6 +24,7 @@ from pipe.config import (
     Interpolate,
     ManualDownload,
     NormalCrafterVariant,
+    NoOp,
     Normals,
     SeedVR2UpscaleVariant,
     Trim,
@@ -35,6 +36,244 @@ from pydantic import BaseModel
 class ExecutedStep(BaseModel):
     output_path: str
     extension: str
+
+
+DOCKER_IMAGE_SPECS: Dict[str, Dict[str, Any]] = {
+    "rife": {
+        "env_var": "RIFE_IMAGE",
+        "default_image": "video-pipelines-rife:latest",
+        "dockerfile": "docker/rife/Dockerfile",
+        "build_args": ["--build-arg", "TORCH_CHANNELS={TORCH_CHANNELS}"],
+    },
+    "esrgan": {
+        "env_var": "ESRGAN_IMAGE",
+        "default_image": "video-pipelines-esrgan:latest",
+        "dockerfile": "docker/esrgan/Dockerfile",
+        "build_args": ["--build-arg", "TORCH_CHANNELS={TORCH_CHANNELS}"],
+    },
+    "seedvr2": {
+        "env_var": "SEEDVR2_IMAGE",
+        "default_image": "video-pipelines-seedvr2:latest",
+        "dockerfile": "docker/seedvr2/Dockerfile",
+        "build_args": [],
+    },
+    "depth_anything_v2": {
+        "env_var": "DEPTH_ANYTHING_V2_IMAGE",
+        "default_image": "video-pipelines-depth-anything-v2:latest",
+        "dockerfile": "docker/depth_anything_v2/Dockerfile",
+        "build_args": [],
+    },
+    "depth_anything_v3": {
+        "env_var": "DEPTH_ANYTHING_V3_IMAGE",
+        "default_image": "video-pipelines-depth-anything-v3:latest",
+        "dockerfile": "docker/depth_anything_v3/Dockerfile",
+        "build_args": [],
+    },
+    "depth_anything_v3_streaming": {
+        "env_var": "DEPTH_ANYTHING_V3_STREAMING_IMAGE",
+        "default_image": "video-pipelines-depth-anything-v3-streaming:latest",
+        "dockerfile": "docker/depth_anything_v3_streaming/Dockerfile",
+        "build_args": ["--build-arg", "TORCH_CHANNELS={TORCH_CHANNELS}"],
+    },
+    "depth_crafter": {
+        "env_var": "DEPTH_CRAFTER_IMAGE",
+        "default_image": "video-pipelines-depth-crafter:latest",
+        "dockerfile": "docker/depth_crafter/Dockerfile",
+        "build_args": [],
+    },
+    "depth_pro": {
+        "env_var": "DEPTH_PRO_IMAGE",
+        "default_image": "video-pipelines-depth-pro:latest",
+        "dockerfile": "docker/depth_pro/Dockerfile",
+        "build_args": [],
+    },
+    "normal_crafter": {
+        "env_var": "NORMAL_CRAFTER_IMAGE",
+        "default_image": "video-pipelines-normal-crafter:latest",
+        "dockerfile": "docker/normal_crafter/Dockerfile",
+        "build_args": [],
+    },
+    "dkt_normal": {
+        "env_var": "DKT_NORMAL_IMAGE",
+        "default_image": "video-pipelines-dkt-normal:latest",
+        "dockerfile": "docker/dkt_normal/Dockerfile",
+        "build_args": [],
+    },
+}
+
+
+def _get_docker_spec(spec_key: str) -> Dict[str, Any]:
+    spec = DOCKER_IMAGE_SPECS.get(spec_key)
+    if spec is None:
+        raise ValueError(f"Unknown docker image spec key: {spec_key}")
+    return spec
+
+
+def get_docker_image(spec_key: str) -> str:
+    spec = _get_docker_spec(spec_key)
+    return os.environ.get(spec["env_var"], spec["default_image"])
+
+
+def _get_docker_build_args(spec_key: str) -> List[str]:
+    spec = _get_docker_spec(spec_key)
+    build_args: List[str] = []
+    for token in spec["build_args"]:
+        build_args.append(
+            token.format(
+                TORCH_CHANNELS=os.environ.get(
+                    "TORCH_CHANNELS",
+                    "cu128 cu129 cu124 cu121 nightly/cu128 nightly/cu129",
+                )
+            )
+        )
+    return build_args
+
+
+def _build_docker_build_command(spec_key: str) -> List[str]:
+    spec = _get_docker_spec(spec_key)
+    image = get_docker_image(spec_key)
+    dockerfile = spec["dockerfile"]
+    return [
+        "docker",
+        "build",
+        *_get_docker_build_args(spec_key),
+        "-t",
+        image,
+        "-f",
+        dockerfile,
+        ".",
+    ]
+
+
+def _build_docker_image(spec_key: str) -> None:
+    command = _build_docker_build_command(spec_key)
+    _run_subprocess(command, f"Failed to build docker image for '{spec_key}'.")
+
+
+def list_buildable_docker_targets() -> List[Tuple[str, str, str]]:
+    keys = sorted(DOCKER_IMAGE_SPECS.keys())
+    return [
+        (key, get_docker_image(key), _get_docker_spec(key)["dockerfile"])
+        for key in keys
+    ]
+
+
+def build_operation_images_by_keys(keys: List[str]) -> None:
+    for key in keys:
+        _build_docker_image(key)
+
+
+def build_all_operation_images() -> None:
+    build_operation_images_by_keys(sorted(DOCKER_IMAGE_SPECS.keys()))
+
+
+def kill_all_operation_containers() -> None:
+    images = [get_docker_image(key) for key in sorted(DOCKER_IMAGE_SPECS.keys())]
+    _kill_docker_containers_by_images(images)
+
+
+def _upscale_variant_image_key(variant: BaseModel) -> str:
+    if isinstance(variant, EsrganUpscaleVariant):
+        return "esrgan"
+    if isinstance(variant, SeedVR2UpscaleVariant):
+        return "seedvr2"
+    raise ValueError(f"Unsupported upscale variant: {variant.__class__.__name__}")
+
+
+def _depth_variant_image_key(variant: BaseModel) -> str:
+    if isinstance(variant, DepthAnythingV2Variant):
+        return "depth_anything_v2"
+    if isinstance(variant, DepthAnythingV3Variant):
+        return "depth_anything_v3"
+    if isinstance(variant, DepthAnythingV3StreamingVariant):
+        return "depth_anything_v3_streaming"
+    if isinstance(variant, DepthCrafterVariant):
+        return "depth_crafter"
+    if isinstance(variant, DepthProVariant):
+        return "depth_pro"
+    raise ValueError(f"Unsupported depth variant: {variant.__class__.__name__}")
+
+
+def _normals_variant_image_key(variant: BaseModel) -> str:
+    if isinstance(variant, NormalCrafterVariant):
+        return "normal_crafter"
+    if isinstance(variant, DktNormalsVariant):
+        return "dkt_normal"
+    raise ValueError(f"Unsupported normals variant: {variant.__class__.__name__}")
+
+
+def _kill_docker_containers_by_image(image: str) -> None:
+    ps_command = ["docker", "ps", "-q", "--filter", f"ancestor={image}"]
+    try:
+        ps_result = subprocess.run(
+            ps_command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Docker executable not found while killing containers."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to list running containers by image.\n\n"
+            f"Exit code: {exc.returncode}\n\n"
+            f"Command: {shlex.join(ps_command)}"
+        ) from exc
+
+    container_ids = [
+        line.strip() for line in ps_result.stdout.splitlines() if line.strip()
+    ]
+    if not container_ids:
+        return
+
+    kill_command = ["docker", "kill", *container_ids]
+    try:
+        subprocess.run(kill_command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to kill running containers for image.\n\n"
+            f"Image: {image}\n\n"
+            f"Exit code: {exc.returncode}\n\n"
+            f"Command: {shlex.join(kill_command)}"
+        ) from exc
+
+
+def _kill_docker_containers_by_images(images: List[str]) -> None:
+    for image in images:
+        _kill_docker_containers_by_image(image)
+
+
+def build_operation(step: BaseModel) -> Any:
+    from pipe.operations.base import Operation
+    from pipe.operations.colmap import ColmapOperation
+    from pipe.operations.depth import DepthOperation
+    from pipe.operations.ffmpeg import FfmpegOperation
+    from pipe.operations.interpolate import InterpolateOperation
+    from pipe.operations.noop import NoOpOperation
+    from pipe.operations.normals import NormalsOperation
+    from pipe.operations.upscale import UpscaleOperation
+
+    operation: Operation
+    if isinstance(step, Ffmpeg):
+        operation = FfmpegOperation()
+    elif isinstance(step, Interpolate):
+        operation = InterpolateOperation()
+    elif isinstance(step, Upscale):
+        operation = UpscaleOperation()
+    elif isinstance(step, Colmap):
+        operation = ColmapOperation()
+    elif isinstance(step, Depth):
+        operation = DepthOperation()
+    elif isinstance(step, Normals):
+        operation = NormalsOperation()
+    elif isinstance(step, NoOp):
+        operation = NoOpOperation()
+    else:
+        raise ValueError(f"Unsupported step type: {type(step).__name__}")
+
+    return operation
 
 
 def _run_subprocess(command: List[str], error_prefix: str) -> None:
@@ -54,6 +293,61 @@ def _run_subprocess(command: List[str], error_prefix: str) -> None:
             f"Command: {shlex.join(command)}",
         ]
         raise RuntimeError("\n\n".join(details)) from exc
+
+
+def resolve_video_input_path(input_path: str) -> str:
+    input_abs = os.path.abspath(input_path)
+    if os.path.splitext(input_abs)[1].lower() != ".json":
+        return input_abs
+
+    try:
+        with open(input_abs, "r") as f:
+            metadata = json.load(f)
+    except Exception as exc:
+        raise RuntimeError(
+            "Expected a video path or a JSON step artifact containing input_video_path, "
+            f"but could not parse JSON file: {input_abs}"
+        ) from exc
+
+    if not isinstance(metadata, dict):
+        raise RuntimeError(f"JSON step artifact is not an object. File: {input_abs}")
+
+    candidate_keys = [
+        "depth_preview_video_path",
+        "normals_preview_video_path",
+        "preview_video_path",
+        "output_video_path",
+        "input_video_path",
+    ]
+
+    chosen_key: str | None = None
+    video_path_raw: str | None = None
+    for key in candidate_keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            chosen_key = key
+            video_path_raw = value
+            break
+
+    if chosen_key is None or video_path_raw is None:
+        raise RuntimeError(
+            "JSON step artifact does not contain a usable video path key. "
+            f"File: {input_abs}"
+        )
+
+    video_path = os.path.abspath(video_path_raw)
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(
+            f"Resolved {chosen_key} from JSON does not exist. "
+            f"JSON: {input_abs} | {chosen_key}: {video_path}"
+        )
+
+    return video_path
+
+
+def resolve_video_extension_from_step_output(step_output_path: str) -> str:
+    resolved_video_path = resolve_video_input_path(step_output_path)
+    return os.path.splitext(resolved_video_path)[1]
 
 
 def _qvec_to_rotmat(qw: float, qx: float, qy: float, qz: float) -> List[List[float]]:
@@ -868,9 +1162,7 @@ def depth_anything_v2(
     depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
     preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
 
-    depth_image = os.environ.get(
-        "DEPTH_ANYTHING_V2_IMAGE", "video-pipelines-depth-anything-v2:latest"
-    )
+    depth_image = get_docker_image("depth_anything_v2")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DEPTH_ANYTHING_V2_MODEL_CACHE_DIR", ".cache/depth-anything-v2")
@@ -978,9 +1270,7 @@ def depth_anything_v3(
     depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
     preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
 
-    depth_image = os.environ.get(
-        "DEPTH_ANYTHING_V3_IMAGE", "video-pipelines-depth-anything-v3:latest"
-    )
+    depth_image = get_docker_image("depth_anything_v3")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DEPTH_ANYTHING_V3_MODEL_CACHE_DIR", ".cache/depth-anything-v3")
@@ -1220,11 +1510,9 @@ def depth_crafter(
 
     input_stem = os.path.splitext(os.path.basename(input_abs))[0]
     depth_npz_path = os.path.join(depth_workspace_dir, f"{input_stem}.npz")
-    preview_video_path = os.path.join(depth_workspace_dir, f"{input_stem}_vis.mp4")
+    preview_video_path = os.path.join(depth_workspace_dir, f"{input_stem}_depth.mp4")
 
-    depth_image = os.environ.get(
-        "DEPTH_CRAFTER_IMAGE", "video-pipelines-depth-crafter:latest"
-    )
+    depth_image = get_docker_image("depth_crafter")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DEPTH_CRAFTER_MODEL_CACHE_DIR", ".cache/depth-crafter")
@@ -1399,10 +1687,15 @@ def depth_crafter(
 
                     chunk_depth_arrays.append(np.load(chunk_npz_path)["depth"])
 
+                    chunk_depth_path = os.path.join(
+                        depth_workspace_dir, f"{chunk_stem}_depth.mp4"
+                    )
                     chunk_vis_path = os.path.join(
                         depth_workspace_dir, f"{chunk_stem}_vis.mp4"
                     )
-                    if os.path.exists(chunk_vis_path):
+                    if os.path.exists(chunk_depth_path):
+                        concat_list.write(f"file '{chunk_depth_path}'\n")
+                    elif os.path.exists(chunk_vis_path):
                         concat_list.write(f"file '{chunk_vis_path}'\n")
 
             merged_depth = np.concatenate(chunk_depth_arrays, axis=0)
@@ -1553,10 +1846,7 @@ def depth_anything_v3_streaming(
     depth_maps_dir = os.path.join(depth_workspace_dir, "depth_maps")
     preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
 
-    depth_image = os.environ.get(
-        "DEPTH_ANYTHING_V3_STREAMING_IMAGE",
-        "video-pipelines-depth-anything-v3-streaming:latest",
-    )
+    depth_image = get_docker_image("depth_anything_v3_streaming")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get(
@@ -1693,7 +1983,7 @@ def depth_pro(
     preview_video_path = os.path.join(depth_workspace_dir, "depth_preview.mp4")
     metrics_npz_dir = os.path.join(depth_workspace_dir, "depth_npz")
 
-    depth_image = os.environ.get("DEPTH_PRO_IMAGE", "video-pipelines-depth-pro:latest")
+    depth_image = get_docker_image("depth_pro")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DEPTH_PRO_MODEL_CACHE_DIR", ".cache/depth-pro")
@@ -1776,57 +2066,13 @@ def execute_depth(
     previous_step: ExecutedStep,
     output_path: str,
 ) -> ExecutedStep:
-    variant = step.variant
-    if isinstance(variant, DepthAnythingV2Variant):
-        depth_anything_v2(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            encoder=variant.encoder,
-            input_size=variant.input_size,
-            precision=variant.precision,
-            fast_resize_height=variant.fast_resize_height,
-            temporal_smoothing_alpha=variant.temporal_smoothing_alpha,
-        )
-    elif isinstance(variant, DepthAnythingV3Variant):
-        depth_anything_v3(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            model=variant.model,
-            max_res=variant.max_res,
-        )
-    elif isinstance(variant, DepthAnythingV3StreamingVariant):
-        depth_anything_v3_streaming(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            max_res=variant.max_res,
-            fps=variant.fps,
-            device=variant.device,
-            chunk_size=variant.chunk_size,
-            overlap=variant.overlap,
-            loop_enable=variant.loop_enable,
-            save_depth_conf_result=variant.save_depth_conf_result,
-            delete_temp_files=variant.delete_temp_files,
-            align_lib=variant.align_lib,
-        )
-    elif isinstance(variant, DepthCrafterVariant):
-        depth_crafter(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            max_res=variant.max_res,
-            process_length=variant.process_length,
-            target_fps=variant.target_fps,
-            max_megapixel_frames=variant.max_megapixel_frames,
-        )
-    elif isinstance(variant, DepthProVariant):
-        depth_pro(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            precision=variant.precision,
-        )
-    else:
-        raise ValueError(f"Unsupported depth variant: {variant.type}")
+    from pipe.operations.depth import DepthOperation
 
-    return ExecutedStep(output_path=output_path, extension=".json")
+    return DepthOperation().run(
+        step=step,
+        previous_step=previous_step,
+        output_path=output_path,
+    )
 
 
 def normal_crafter(
@@ -1923,9 +2169,7 @@ def normal_crafter(
     normals_npz_path = os.path.join(normals_workspace_dir, f"{input_stem}.npz")
     preview_video_path = os.path.join(normals_workspace_dir, f"{input_stem}_vis.mp4")
 
-    normals_image = os.environ.get(
-        "NORMAL_CRAFTER_IMAGE", "video-pipelines-normal-crafter:latest"
-    )
+    normals_image = get_docker_image("normal_crafter")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("NORMAL_CRAFTER_MODEL_CACHE_DIR", ".cache/normal-crafter")
@@ -2059,36 +2303,13 @@ def execute_normals(
     previous_step: ExecutedStep,
     output_path: str,
 ) -> ExecutedStep:
-    variant = step.variant
-    if isinstance(variant, NormalCrafterVariant):
-        normal_crafter(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            cpu_offload=variant.cpu_offload,
-            unet_path=variant.unet_path,
-            pre_train_path=variant.pre_train_path,
-            max_res=variant.max_res,
-            process_length=variant.process_length,
-            target_fps=variant.target_fps,
-            window_size=variant.window_size,
-            time_step_size=variant.time_step_size,
-            decode_chunk_size=variant.decode_chunk_size,
-        )
-    elif isinstance(variant, DktNormalsVariant):
-        dkt_normals(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            model_id=variant.model_id,
-            height=variant.height,
-            width=variant.width,
-            num_inference_steps=variant.num_inference_steps,
-            window_size=variant.window_size,
-            overlap=variant.overlap,
-        )
-    else:
-        raise ValueError(f"Unsupported normals variant: {variant.type}")
+    from pipe.operations.normals import NormalsOperation
 
-    return ExecutedStep(output_path=output_path, extension=".json")
+    return NormalsOperation().run(
+        step=step,
+        previous_step=previous_step,
+        output_path=output_path,
+    )
 
 
 def dkt_normals(
@@ -2136,7 +2357,7 @@ def dkt_normals(
     normals_npz_path = os.path.join(normals_workspace_dir, f"{input_stem}.npz")
     preview_video_path = os.path.join(normals_workspace_dir, f"{input_stem}_vis.mp4")
 
-    dkt_image = os.environ.get("DKT_NORMAL_IMAGE", "video-pipelines-dkt-normal:latest")
+    dkt_image = get_docker_image("dkt_normal")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("DKT_NORMAL_MODEL_CACHE_DIR", ".cache/dkt-normal-model")
@@ -2211,6 +2432,7 @@ def dkt_normals(
 
 
 def get_video_fps(input_path: str) -> float:
+    input_path = resolve_video_input_path(input_path)
     command = [
         "ffprobe",
         "-v",
@@ -2262,6 +2484,7 @@ def get_video_fps(input_path: str) -> float:
 
 
 def get_video_width(input_path: str) -> int:
+    input_path = resolve_video_input_path(input_path)
     command = [
         "ffprobe",
         "-v",
@@ -2313,7 +2536,7 @@ def interpolate(input_path: str, output_path: str, fps: int) -> None:
             f"Invalid interpolate fps={fps}. Fps must be a positive integer."
         )
 
-    input_abs = os.path.abspath(input_path)
+    input_abs = resolve_video_input_path(input_path)
     output_abs = os.path.abspath(output_path)
     input_dir = os.path.dirname(input_abs)
     output_dir = os.path.dirname(output_abs)
@@ -2333,7 +2556,7 @@ def interpolate(input_path: str, output_path: str, fps: int) -> None:
     while scale < required_scale:
         scale *= 2
 
-    rife_image = os.environ.get("RIFE_IMAGE", "video-pipelines-rife:latest")
+    rife_image = get_docker_image("rife")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("RIFE_MODEL_CACHE_DIR", ".cache/rife-model")
@@ -2376,12 +2599,16 @@ def interpolate(input_path: str, output_path: str, fps: int) -> None:
 def execute_interpolate(
     step: Interpolate, previous_step: ExecutedStep, output_path: str
 ) -> ExecutedStep:
+    resolved_input_path = resolve_video_input_path(previous_step.output_path)
     interpolate(
-        input_path=previous_step.output_path,
+        input_path=resolved_input_path,
         output_path=output_path,
         fps=step.fps,
     )
-    return ExecutedStep(output_path=output_path, extension=previous_step.extension)
+    return ExecutedStep(
+        output_path=output_path,
+        extension=os.path.splitext(resolved_input_path)[1],
+    )
 
 
 def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
@@ -2390,7 +2617,7 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
             f"Invalid upscale width={width}. Width must be a positive integer."
         )
 
-    input_abs = os.path.abspath(input_path)
+    input_abs = resolve_video_input_path(input_path)
     output_abs = os.path.abspath(output_path)
     input_dir = os.path.dirname(input_abs)
     output_dir = os.path.dirname(output_abs)
@@ -2402,7 +2629,7 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
             f"Requested width={width} is not larger than input width={input_width}."
         )
 
-    esrgan_image = os.environ.get("ESRGAN_IMAGE", "video-pipelines-esrgan:latest")
+    esrgan_image = get_docker_image("esrgan")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("ESRGAN_MODEL_CACHE_DIR", ".cache/esrgan-model")
@@ -2439,6 +2666,7 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
 
 
 def _get_video_dimensions(input_path: str) -> tuple[int, int]:
+    input_path = resolve_video_input_path(input_path)
     command = [
         "ffprobe",
         "-v",
@@ -2545,7 +2773,7 @@ def upscale_seedvr2(
             f"Invalid SeedVR2 temporal_overlap={variant.temporal_overlap}. Must be non-negative."
         )
 
-    input_abs = os.path.abspath(input_path)
+    input_abs = resolve_video_input_path(input_path)
     output_abs = os.path.abspath(output_path)
     input_dir = os.path.dirname(input_abs)
     output_dir = os.path.dirname(output_abs)
@@ -2561,7 +2789,7 @@ def upscale_seedvr2(
     input_short_side = min(input_width, input_height)
     target_short_side = max(2, int(round(input_short_side * scale)))
 
-    seedvr2_image = os.environ.get("SEEDVR2_IMAGE", "video-pipelines-seedvr2:latest")
+    seedvr2_image = get_docker_image("seedvr2")
     docker_gpu_args = shlex.split(os.environ.get("DOCKER_GPU_ARGS", "--gpus all"))
     model_cache_dir = os.path.abspath(
         os.environ.get("SEEDVR2_MODEL_CACHE_DIR", ".cache/seedvr2-model")
@@ -2672,22 +2900,10 @@ def upscale_seedvr2(
 def execute_upscale(
     step: Upscale, previous_step: ExecutedStep, output_path: str
 ) -> ExecutedStep:
-    width = step.width
-    variant = step.variant
-    if isinstance(variant, EsrganUpscaleVariant):
-        upscale_esrgan(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            width=width,
-        )
-    elif isinstance(variant, SeedVR2UpscaleVariant):
-        upscale_seedvr2(
-            input_path=previous_step.output_path,
-            output_path=output_path,
-            width=width,
-            variant=variant,
-        )
-    else:
-        raise ValueError(f"Unsupported upscale variant: {variant.type}")
+    from pipe.operations.upscale import UpscaleOperation
 
-    return ExecutedStep(output_path=output_path, extension=previous_step.extension)
+    return UpscaleOperation().run(
+        step=step,
+        previous_step=previous_step,
+        output_path=output_path,
+    )

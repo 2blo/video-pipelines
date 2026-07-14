@@ -3,10 +3,21 @@ from typing import List
 
 import typer
 import yaml
-from pipe.pipeline import filter_config_pipelines, load_config_from_chart_path, run_config
+from pipe.ops import (
+    build_all_operation_images,
+    build_operation_images_by_keys,
+    kill_all_operation_containers,
+    list_buildable_docker_targets,
+)
+from pipe.pipeline import (
+    filter_config_pipelines,
+    load_config_from_chart_path,
+    run_config,
+)
 from pydantic import BaseModel
 
 SETTINGS_FILE = "cli-settings.yaml"
+app = typer.Typer()
 
 
 class CliSettings(BaseModel):
@@ -35,7 +46,9 @@ def load_or_create_settings() -> CliSettings:
 def choose_chart(charts_directory: str) -> Path:
     charts_path = Path(charts_directory)
     if not charts_path.exists() or not charts_path.is_dir():
-        raise ValueError(f"Charts directory does not exist or is not a directory: {charts_directory}")
+        raise ValueError(
+            f"Charts directory does not exist or is not a directory: {charts_directory}"
+        )
 
     chart_files = sorted(
         [
@@ -107,11 +120,24 @@ def choose_pipelines(pipeline_names: List[str]) -> List[str]:
     return _parse_pipeline_selection(selection, pipeline_names)
 
 
-def run() -> None:
+@app.command()
+def run(
+    chart: str | None = typer.Option(
+        None,
+        "--chart",
+        help="Path to a chart file. If omitted, you will be prompted to select one.",
+    ),
+) -> None:
     settings = load_or_create_settings()
-    chart_path = choose_chart(settings.charts_directory)
+    if chart is None:
+        chart_path = choose_chart(settings.charts_directory)
+    else:
+        chart_path = Path(chart)
+        if not chart_path.exists() or not chart_path.is_file():
+            raise ValueError(f"Chart file does not exist: {chart}")
 
     loaded_config = load_config_from_chart_path(str(chart_path))
+
     pipeline_names = list(loaded_config.config.job.pipelines.keys())
     selected = choose_pipelines(pipeline_names)
 
@@ -123,8 +149,69 @@ def run() -> None:
     )
 
 
+def _parse_numbered_selection(selection: str, n_items: int) -> List[int]:
+    items = [item.strip() for item in selection.split(",") if item.strip()]
+    if not items:
+        raise ValueError("No selection provided.")
+
+    selected: List[int] = []
+    for item in items:
+        if not item.isdigit():
+            raise ValueError(f"Invalid selection '{item}'. Use numbers like 1,2,3.")
+        idx = int(item)
+        if idx < 1 or idx > n_items:
+            raise ValueError(f"Invalid selection number: {idx}")
+        selected.append(idx - 1)
+
+    deduped: List[int] = []
+    seen = set()
+    for idx in selected:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        deduped.append(idx)
+    return deduped
+
+
+@app.command()
+def build() -> None:
+    targets = list_buildable_docker_targets()
+    if not targets:
+        typer.echo("No buildable docker targets found.")
+        return
+
+    typer.echo("Buildable docker images:")
+    for index, (_, image, dockerfile) in enumerate(targets, start=1):
+        typer.echo(f"{index}. {image} ({dockerfile})")
+
+    selection = (
+        typer.prompt(
+            "Build all images? [Y] or enter numbers (comma-separated)",
+            default="y",
+        )
+        .strip()
+        .lower()
+    )
+
+    if selection in ["", "y", "yes", "all", "a", "*"]:
+        build_all_operation_images()
+        typer.echo("Built all operation docker images.")
+        return
+
+    selected_indexes = _parse_numbered_selection(selection, len(targets))
+    selected_keys = [targets[idx][0] for idx in selected_indexes]
+    build_operation_images_by_keys(selected_keys)
+    typer.echo("Built selected operation docker images.")
+
+
+@app.command()
+def kill() -> None:
+    kill_all_operation_containers()
+    typer.echo("Kill invoked for all operation docker containers.")
+
+
 def main() -> None:
-    typer.run(run)
+    app()
 
 
 if __name__ == "__main__":

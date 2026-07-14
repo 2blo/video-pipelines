@@ -107,16 +107,25 @@ def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_half = device.type == "cuda"
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        try:
-            torch.set_float32_matmul_precision("high")
-        except Exception:
-            pass
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for ESRGAN inference.")
+    try:
+        _ = (torch.zeros(1, device="cuda") + 1).item()
+    except Exception as exc:
+        raise RuntimeError(
+            "CUDA is visible but unusable by this PyTorch build. "
+            f"torch={torch.__version__}, cuda={torch.version.cuda}"
+        ) from exc
+
+    device = torch.device("cuda:0")
+    use_half = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
     frame_paths = sorted(glob.glob(os.path.join(args.input_dir, "*.png")))
     if not frame_paths:
