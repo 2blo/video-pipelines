@@ -127,6 +127,7 @@ class DepthCrafterVariant(BaseModel):
     process_length: int | None = None
     target_fps: int | None = None
     max_megapixel_frames: float | None = None
+    enable_chunk_hack: bool = True
 
 
 class DepthProVariant(BaseModel):
@@ -212,14 +213,7 @@ class Branch(BaseModel):
 
 
 Step = Annotated[
-    Ffmpeg
-    | Interpolate
-    | Upscale
-    | Colmap
-    | Depth
-    | Normals
-    | NoOp
-    | Branch,
+    Ffmpeg | Interpolate | Upscale | Colmap | Depth | Normals | NoOp | Branch,
     Field(discriminator="type"),
 ]
 

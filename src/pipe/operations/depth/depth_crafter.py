@@ -31,6 +31,7 @@ class DepthCrafterOperation:
             process_length=variant.process_length,
             target_fps=variant.target_fps,
             max_megapixel_frames=variant.max_megapixel_frames,
+            enable_chunk_hack=variant.enable_chunk_hack,
         )
         return ExecutedStep(output_path=output_path, extension=".json")
 

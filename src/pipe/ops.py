@@ -1351,6 +1351,7 @@ def depth_crafter(
     process_length: int | None,
     target_fps: int | None,
     max_megapixel_frames: float | None,
+    enable_chunk_hack: bool,
 ) -> None:
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -1438,7 +1439,8 @@ def depth_crafter(
     # DepthCrafter can crash with "input tensor must fit into 32-bit index math"
     # for long high-res clips. Keep max_res unchanged and switch to chunked processing.
     if (
-        source_width is not None
+        enable_chunk_hack
+        and source_width is not None
         and source_height is not None
         and source_nb_frames is not None
         and source_nb_frames > 0
@@ -1672,61 +1674,112 @@ def depth_crafter(
                 start_frame = end_frame
                 chunk_index += 1
 
+            def _write_depth_preview_video(
+                depth_array: Any,
+                output_video_path: str,
+                fps_for_video: int,
+            ) -> None:
+                if depth_array.ndim != 3:
+                    raise RuntimeError(
+                        "Expected merged depth array shape [T,H,W], got "
+                        f"{depth_array.shape}"
+                    )
+
+                depth_float = depth_array.astype(np.float32)
+                depth_min = float(depth_float.min())
+                depth_max = float(depth_float.max())
+                if depth_max > depth_min:
+                    normalized = (depth_float - depth_min) / (depth_max - depth_min)
+                else:
+                    normalized = np.zeros_like(depth_float, dtype=np.float32)
+
+                height = int(normalized.shape[1])
+                width = int(normalized.shape[2])
+                os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
+
+                command = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-s",
+                    f"{width}x{height}",
+                    "-r",
+                    str(fps_for_video),
+                    "-i",
+                    "-",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    output_video_path,
+                ]
+
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+                except OSError as exc:
+                    raise RuntimeError(
+                        "Failed to start ffmpeg for merged DepthCrafter preview render.\n\n"
+                        f"Command: {shlex.join(command)}"
+                    ) from exc
+
+                assert process.stdin is not None
+                for frame in normalized:
+                    frame_u8 = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+                    rgb = np.repeat(frame_u8[:, :, None], 3, axis=2)
+                    process.stdin.write(rgb.tobytes())
+                process.stdin.close()
+
+                stderr_bytes = b""
+                if process.stderr is not None:
+                    stderr_bytes = process.stderr.read()
+                exit_code = process.wait()
+                if exit_code != 0:
+                    stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+                    details: List[str] = [
+                        "Failed to render merged DepthCrafter preview video.",
+                        f"Exit code: {exit_code}",
+                        f"Command: {shlex.join(command)}",
+                    ]
+                    if stderr_text:
+                        details.append(f"stderr:\n{stderr_text}")
+                    raise RuntimeError("\n\n".join(details))
+
             chunk_depth_arrays: List[Any] = []
-            concat_list_path = os.path.join(temp_dir, "vis_concat.txt")
-            with open(concat_list_path, "w") as concat_list:
-                for chunk_stem in chunk_stems:
-                    chunk_npz_path = os.path.join(
-                        depth_workspace_dir, f"{chunk_stem}.npz"
+            for chunk_stem in chunk_stems:
+                chunk_npz_path = os.path.join(depth_workspace_dir, f"{chunk_stem}.npz")
+                if not os.path.exists(chunk_npz_path):
+                    raise RuntimeError(
+                        "DepthCrafter chunk completed but produced no depth NPZ file at "
+                        f"{chunk_npz_path}"
                     )
-                    if not os.path.exists(chunk_npz_path):
-                        raise RuntimeError(
-                            "DepthCrafter chunk completed but produced no depth NPZ file at "
-                            f"{chunk_npz_path}"
-                        )
 
-                    chunk_depth_arrays.append(np.load(chunk_npz_path)["depth"])
-
-                    chunk_depth_path = os.path.join(
-                        depth_workspace_dir, f"{chunk_stem}_depth.mp4"
-                    )
-                    chunk_vis_path = os.path.join(
-                        depth_workspace_dir, f"{chunk_stem}_vis.mp4"
-                    )
-                    if os.path.exists(chunk_depth_path):
-                        concat_list.write(f"file '{chunk_depth_path}'\n")
-                    elif os.path.exists(chunk_vis_path):
-                        concat_list.write(f"file '{chunk_vis_path}'\n")
+                chunk_depth_arrays.append(np.load(chunk_npz_path)["depth"])
 
             merged_depth = np.concatenate(chunk_depth_arrays, axis=0)
             if merged_depth.shape[0] > total_frames:
                 merged_depth = merged_depth[:total_frames]
             np.savez_compressed(depth_npz_path, depth=merged_depth)
-
-            if os.path.getsize(concat_list_path) > 0:
-                concat_command = [
-                    "ffmpeg",
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    concat_list_path,
-                    "-c",
-                    "copy",
-                    preview_video_path,
-                ]
-                _run_subprocess(
-                    concat_command,
-                    "Failed to concatenate DepthCrafter chunk preview videos.",
-                )
+            _write_depth_preview_video(
+                depth_array=merged_depth,
+                output_video_path=preview_video_path,
+                fps_for_video=target_fps,
+            )
 
     output = {
         "input_video_path": input_abs,
         "max_res": max_res,
         "process_length": process_length,
         "target_fps": target_fps,
+        "enable_chunk_hack": enable_chunk_hack,
         "chunked_processing": used_chunking,
         "chunk_frame_limit": chunk_frame_limit,
         "depth_workspace_dir": depth_workspace_dir,

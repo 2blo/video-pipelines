@@ -27,6 +27,7 @@ job:
                 type: depth_crafter
                 max_res: 1080
                 max_megapixel_frames: 30
+                enable_chunk_hack: false
         - type: upscale
           variant:
             type: esrgan
