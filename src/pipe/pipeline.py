@@ -398,6 +398,36 @@ class StepEventLogger:
         ).fetchone()
         return row is not None
 
+    def get_last_completed_step_output_path(
+        self,
+        *,
+        job_name: str,
+        pipeline_name: str,
+        step_index: int,
+        step_json: str,
+    ) -> str | None:
+        row = self._conn.execute(
+            f"""
+            SELECT file.path
+            FROM {STEP_EVENTS_TABLE}
+            WHERE step.event = 'completed'
+              AND job.name = ?
+              AND pipeline.name = ?
+              AND step.index = ?
+              AND step.step_json = ?
+              AND file.path IS NOT NULL
+            ORDER BY event_timestamp DESC
+            LIMIT 1
+            """,
+            [job_name, pipeline_name, step_index, step_json],
+        ).fetchone()
+        if row is None:
+            return None
+        path = row[0]
+        if not isinstance(path, str) or not path:
+            return None
+        return path
+
     def close(self) -> None:
         self._conn.close()
 
@@ -412,6 +442,13 @@ def _sanitize_branch_label(raw_label: str) -> str:
     )
     sanitized = sanitized.strip("_")
     return sanitized if sanitized else "branch"
+
+
+def _compose_branch_label(parent_label: str, branch_name: str) -> str:
+    sanitized_name = _sanitize_branch_label(branch_name)
+    if parent_label == "main":
+        return sanitized_name
+    return _sanitize_branch_label(f"{parent_label}__{sanitized_name}")
 
 
 def _get_step_output_extension(
@@ -446,8 +483,9 @@ def kill_all_step_operations(config: Config) -> None:
     for _, pipeline in config.job.pipelines.items():
         for step in pipeline.steps:
             if isinstance(step, Branch):
-                for branch_step in step.branches:
-                    build_operation(branch_step).kill(branch_step)
+                for branch in step.branches:
+                    for branch_step in branch.steps:
+                        build_operation(branch_step).kill(branch_step)
                 continue
 
             build_operation(step).kill(step)
@@ -561,12 +599,19 @@ def run_config(
                     if not step.branches:
                         raise ValueError("Branch step requires at least one branch.")
 
-                    expanded_work: List[tuple[str, str, BaseModel, ExecutedStep]] = []
+                    n_branch_outputs = len(active_branches) * len(step.branches)
+                    next_active_branches = []
                     for parent_branch in active_branches:
                         next_labels: set[str] = set()
-                        for branch_index, branch_step in enumerate(step.branches):
-                            candidate_label = _sanitize_branch_label(
-                                f"{parent_branch.name}_{branch_index}_{branch_step.type}"
+                        for branch in step.branches:
+                            if not branch.steps:
+                                raise ValueError(
+                                    f"Named branch '{branch.name}' must contain at least one step."
+                                )
+
+                            candidate_label = _compose_branch_label(
+                                parent_branch.name,
+                                branch.name,
                             )
                             if candidate_label in next_labels:
                                 raise ValueError(
@@ -574,26 +619,272 @@ def run_config(
                                     f"Branch name collision at '{candidate_label}'."
                                 )
                             next_labels.add(candidate_label)
-                            expanded_work.append(
-                                (
-                                    candidate_label,
-                                    f"branch:{branch_step.type}",
+                            branch_previous_step = parent_branch.previous_step
+
+                            for branch_step_index, branch_step in enumerate(
+                                branch.steps
+                            ):
+                                is_last_step_in_named_branch = branch_step_index == (
+                                    len(branch.steps) - 1
+                                )
+                                is_terminal_output = (
+                                    is_last_step and is_last_step_in_named_branch
+                                )
+                                step_type = f"branch:{branch_step.type}"
+
+                                output_extension = _get_step_output_extension(
                                     branch_step,
-                                    parent_branch.previous_step,
+                                    branch_previous_step.extension,
+                                    branch_previous_step.output_path,
+                                )
+
+                                if is_terminal_output:
+                                    pipeline_output_dir = os.path.join(
+                                        config.output_dir,
+                                        pipeline_name,
+                                    )
+                                    os.makedirs(pipeline_output_dir, exist_ok=True)
+                                    if n_branch_outputs == 1 and candidate_label == "main":
+                                        intended_output = os.path.join(
+                                            pipeline_output_dir,
+                                            f"{pipeline_name}{output_extension}",
+                                        )
+                                    else:
+                                        intended_output = os.path.join(
+                                            pipeline_output_dir,
+                                            f"{pipeline_name}__{candidate_label}{output_extension}",
+                                        )
+                                else:
+                                    if candidate_label == "main":
+                                        filename = (
+                                            f"{pipeline_name}_step_{step_index}_{branch_step_index}_"
+                                            f"{branch_step.__class__.__name__}{output_extension}"
+                                        )
+                                    else:
+                                        filename = (
+                                            f"{pipeline_name}__{candidate_label}_step_{step_index}_"
+                                            f"{branch_step_index}_{branch_step.__class__.__name__}"
+                                            f"{output_extension}"
+                                        )
+                                    intended_output = os.path.join(pipeline_dir, filename)
+
+                                step_json = json.dumps(
+                                    {
+                                        "branch": candidate_label,
+                                        "branch_step_index": branch_step_index,
+                                        "step": branch_step.model_dump(mode="json"),
+                                    },
+                                    sort_keys=True,
+                                )
+
+                                start_ts = utc_now()
+                                start_file_info = probe_media_file_info(
+                                    intended_output, include_hash=False
+                                )
+                                logger.log_step_event(
+                                    event_timestamp=start_ts,
+                                    chart_path=chart_path,
+                                    chart_json=chart_json,
+                                    rendered_config_json=rendered,
+                                    job_name=config.job.name,
+                                    pipeline_index=pipeline_index,
+                                    n_pipelines=n_pipelines,
+                                    job_end_timestamp=None,
+                                    pipeline_name=pipeline_name,
+                                    pipeline_metadata_json=pipeline_metadata_json,
+                                    pipeline_input_json=pipeline_input_json,
+                                    total_n_steps=total_n_steps,
+                                    pipeline_start_timestamp=pipeline_start_timestamp,
+                                    pipeline_end_timestamp=None,
+                                    step_index=step_index,
+                                    step_type=step_type,
+                                    step_json=step_json,
+                                    step_event="start",
+                                    step_start_timestamp=start_ts,
+                                    step_end_timestamp=None,
+                                    job_start_timestamp=job_start_timestamp,
+                                    file_info=start_file_info,
+                                    error_message=None,
+                                )
+
+                                existing_output_path = None
+                                if not config.full_refresh:
+                                    if os.path.exists(intended_output):
+                                        existing_output_path = intended_output
+                                    else:
+                                        previous_output_path = (
+                                            logger.get_last_completed_step_output_path(
+                                                job_name=config.job.name,
+                                                pipeline_name=pipeline_name,
+                                                step_index=step_index,
+                                                step_json=step_json,
+                                            )
+                                        )
+                                        if (
+                                            previous_output_path is not None
+                                            and os.path.exists(previous_output_path)
+                                        ):
+                                            existing_output_path = previous_output_path
+
+                                if existing_output_path is not None:
+                                    existing_file_info = probe_media_file_info(
+                                        existing_output_path,
+                                        include_hash=True,
+                                    )
+                                    existing_output_hash = existing_file_info.sha256
+                                    if existing_output_hash is None:
+                                        existing_output_hash = hash_file_sha256(
+                                            existing_output_path
+                                        )
+                                    should_skip = logger.should_skip_step(
+                                        job_name=config.job.name,
+                                        pipeline_name=pipeline_name,
+                                        step_index=step_index,
+                                        step_json=step_json,
+                                        output_file_hash=existing_output_hash,
+                                    )
+                                    if should_skip:
+                                        skip_ts = utc_now()
+                                        pipeline_end_timestamp = (
+                                            skip_ts if is_terminal_output else None
+                                        )
+                                        job_end_timestamp = (
+                                            skip_ts
+                                            if is_terminal_output and is_last_pipeline
+                                            else None
+                                        )
+                                        logger.log_step_event(
+                                            event_timestamp=skip_ts,
+                                            chart_path=chart_path,
+                                            chart_json=chart_json,
+                                            rendered_config_json=rendered,
+                                            job_name=config.job.name,
+                                            pipeline_index=pipeline_index,
+                                            n_pipelines=n_pipelines,
+                                            job_end_timestamp=job_end_timestamp,
+                                            pipeline_name=pipeline_name,
+                                            pipeline_metadata_json=pipeline_metadata_json,
+                                            pipeline_input_json=pipeline_input_json,
+                                            total_n_steps=total_n_steps,
+                                            pipeline_start_timestamp=pipeline_start_timestamp,
+                                            pipeline_end_timestamp=pipeline_end_timestamp,
+                                            step_index=step_index,
+                                            step_type=step_type,
+                                            step_json=step_json,
+                                            step_event="skipped",
+                                            step_start_timestamp=start_ts,
+                                            step_end_timestamp=skip_ts,
+                                            job_start_timestamp=job_start_timestamp,
+                                            file_info=existing_file_info,
+                                            error_message=None,
+                                        )
+                                        branch_previous_step = ExecutedStep(
+                                            output_path=existing_output_path,
+                                            extension=os.path.splitext(
+                                                existing_output_path
+                                            )[1],
+                                        )
+                                        continue
+
+                                try:
+                                    executed_step = _execute_single_step(
+                                        step=branch_step,
+                                        previous_step=branch_previous_step,
+                                        output_path=intended_output,
+                                    )
+                                except Exception as exc:
+                                    failed_ts = utc_now()
+                                    failed_file_info = probe_media_file_info(
+                                        intended_output, include_hash=False
+                                    )
+                                    logger.log_step_event(
+                                        event_timestamp=failed_ts,
+                                        chart_path=chart_path,
+                                        chart_json=chart_json,
+                                        rendered_config_json=rendered,
+                                        job_name=config.job.name,
+                                        pipeline_index=pipeline_index,
+                                        n_pipelines=n_pipelines,
+                                        job_end_timestamp=failed_ts,
+                                        pipeline_name=pipeline_name,
+                                        pipeline_metadata_json=pipeline_metadata_json,
+                                        pipeline_input_json=pipeline_input_json,
+                                        total_n_steps=total_n_steps,
+                                        pipeline_start_timestamp=pipeline_start_timestamp,
+                                        pipeline_end_timestamp=failed_ts,
+                                        step_index=step_index,
+                                        step_type=step_type,
+                                        step_json=step_json,
+                                        step_event="failed",
+                                        step_start_timestamp=start_ts,
+                                        step_end_timestamp=failed_ts,
+                                        job_start_timestamp=job_start_timestamp,
+                                        file_info=failed_file_info,
+                                        error_message=str(exc),
+                                    )
+                                    raise
+
+                                completed_ts = utc_now()
+                                completed_file_info = probe_media_file_info(
+                                    executed_step.output_path,
+                                    include_hash=True,
+                                )
+                                pipeline_end_timestamp = (
+                                    completed_ts if is_terminal_output else None
+                                )
+                                job_end_timestamp = (
+                                    completed_ts
+                                    if is_terminal_output and is_last_pipeline
+                                    else None
+                                )
+                                logger.log_step_event(
+                                    event_timestamp=completed_ts,
+                                    chart_path=chart_path,
+                                    chart_json=chart_json,
+                                    rendered_config_json=rendered,
+                                    job_name=config.job.name,
+                                    pipeline_index=pipeline_index,
+                                    n_pipelines=n_pipelines,
+                                    job_end_timestamp=job_end_timestamp,
+                                    pipeline_name=pipeline_name,
+                                    pipeline_metadata_json=pipeline_metadata_json,
+                                    pipeline_input_json=pipeline_input_json,
+                                    total_n_steps=total_n_steps,
+                                    pipeline_start_timestamp=pipeline_start_timestamp,
+                                    pipeline_end_timestamp=pipeline_end_timestamp,
+                                    step_index=step_index,
+                                    step_type=step_type,
+                                    step_json=step_json,
+                                    step_event="completed",
+                                    step_start_timestamp=start_ts,
+                                    step_end_timestamp=completed_ts,
+                                    job_start_timestamp=job_start_timestamp,
+                                    file_info=completed_file_info,
+                                    error_message=None,
+                                )
+                                branch_previous_step = executed_step
+
+                            next_active_branches.append(
+                                BranchState(
+                                    name=candidate_label,
+                                    previous_step=branch_previous_step,
                                 )
                             )
-                else:
-                    expanded_work = [
-                        (
-                            branch_state.name,
-                            step.type,
-                            step,
-                            branch_state.previous_step,
-                        )
-                        for branch_state in active_branches
-                    ]
 
-                next_active_branches: List[BranchState] = []
+                    active_branches = next_active_branches
+                    continue
+
+                expanded_work = [
+                    (
+                        branch_state.name,
+                        step.type,
+                        step,
+                        branch_state.previous_step,
+                    )
+                    for branch_state in active_branches
+                ]
+
+                linear_next_active_branches = []
                 for (
                     branch_label,
                     step_type,
@@ -630,7 +921,7 @@ def run_config(
                             )
                         else:
                             filename = (
-                                f"{pipeline_name}_step_{step_index}_{branch_label}_"
+                                f"{pipeline_name}__{branch_label}_step_{step_index}_"
                                 f"{concrete_step.__class__.__name__}{output_extension}"
                             )
                         intended_output = os.path.join(pipeline_dir, filename)
@@ -673,14 +964,35 @@ def run_config(
                         error_message=None,
                     )
 
-                    if not config.full_refresh and os.path.exists(intended_output):
+                    linear_existing_output_path = None
+                    if not config.full_refresh:
+                        if os.path.exists(intended_output):
+                            linear_existing_output_path = intended_output
+                        else:
+                            previous_output_path = (
+                                logger.get_last_completed_step_output_path(
+                                    job_name=config.job.name,
+                                    pipeline_name=pipeline_name,
+                                    step_index=step_index,
+                                    step_json=step_json,
+                                )
+                            )
+                            if (
+                                previous_output_path is not None
+                                and os.path.exists(previous_output_path)
+                            ):
+                                linear_existing_output_path = previous_output_path
+
+                    if linear_existing_output_path is not None:
                         existing_file_info = probe_media_file_info(
-                            intended_output,
+                            linear_existing_output_path,
                             include_hash=True,
                         )
                         existing_output_hash = existing_file_info.sha256
                         if existing_output_hash is None:
-                            existing_output_hash = hash_file_sha256(intended_output)
+                            existing_output_hash = hash_file_sha256(
+                                linear_existing_output_path
+                            )
                         should_skip = logger.should_skip_step(
                             job_name=config.job.name,
                             pipeline_name=pipeline_name,
@@ -719,12 +1031,14 @@ def run_config(
                                 file_info=existing_file_info,
                                 error_message=None,
                             )
-                            next_active_branches.append(
+                            linear_next_active_branches.append(
                                 BranchState(
                                     name=branch_label,
                                     previous_step=ExecutedStep(
-                                        output_path=intended_output,
-                                        extension=output_extension,
+                                        output_path=linear_existing_output_path,
+                                        extension=os.path.splitext(
+                                            linear_existing_output_path
+                                        )[1],
                                     ),
                                 )
                             )
@@ -803,11 +1117,11 @@ def run_config(
                         error_message=None,
                     )
 
-                    next_active_branches.append(
+                    linear_next_active_branches.append(
                         BranchState(name=branch_label, previous_step=executed_step)
                     )
 
-                active_branches = next_active_branches
+                active_branches = linear_next_active_branches
     finally:
         logger.close()
 

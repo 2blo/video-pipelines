@@ -1,7 +1,7 @@
 from datetime import timedelta
 from typing import Annotated, Any, Dict, List, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ManualDownload(BaseModel):
@@ -127,7 +127,7 @@ class DepthCrafterVariant(BaseModel):
     process_length: int | None = None
     target_fps: int | None = None
     max_megapixel_frames: float | None = None
-    enable_chunk_hack: bool = True
+    enable_chunk_hack: bool = False
 
 
 class DepthProVariant(BaseModel):
@@ -207,9 +207,59 @@ BranchStep = Annotated[
 ]
 
 
+class NamedBranch(BaseModel):
+    name: str
+    steps: List[BranchStep]
+
+
 class Branch(BaseModel):
     type: Literal["branch"]
-    branches: List[BranchStep]
+    branches: List[NamedBranch]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_branches_shape(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+
+        raw_branches = data.get("branches")
+        if isinstance(raw_branches, dict):
+            normalized = [
+                {"name": branch_name, "steps": branch_steps}
+                for branch_name, branch_steps in raw_branches.items()
+            ]
+            data = dict(data)
+            data["branches"] = normalized
+            return data
+
+        if isinstance(raw_branches, list):
+            if all(
+                isinstance(item, dict)
+                and "name" in item
+                and "steps" in item
+                for item in raw_branches
+            ):
+                return data
+
+            legacy_normalized: List[Dict[str, Any]] = []
+            for index, branch_step in enumerate(raw_branches):
+                step_type = "branch"
+                if isinstance(branch_step, dict):
+                    raw_type = branch_step.get("type")
+                    if isinstance(raw_type, str) and raw_type:
+                        step_type = raw_type
+
+                legacy_normalized.append(
+                    {
+                        "name": f"{index}_{step_type}",
+                        "steps": [branch_step],
+                    }
+                )
+
+            data = dict(data)
+            data["branches"] = legacy_normalized
+
+        return data
 
 
 Step = Annotated[
