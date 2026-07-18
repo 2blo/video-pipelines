@@ -3006,10 +3006,10 @@ def upscale_esrgan(
             f"Requested width={width} is not larger than input width={input_width}."
         )
 
-    reference_width, reference_height = _get_video_dimensions(aspect_reference_input_abs)
-    target_height = int(
-        round((reference_height * width) / max(reference_width, 1))
+    reference_width, reference_height = _get_video_dimensions(
+        aspect_reference_input_abs
     )
+    target_height = int(round((reference_height * width) / max(reference_width, 1)))
     if target_height <= 0:
         raise RuntimeError(
             "Computed invalid ESRGAN target height from aspect reference. "
