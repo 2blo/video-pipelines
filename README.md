@@ -36,7 +36,7 @@ Alternatives:
 
 - upscale to 4k
   - seedvr2 unstable, worked some time but crash usually
-  - esrgan stable, a bit slow.
+  - esrgan stable if other resource usage is limited (close after effects), a bit slow.
 - depth
   - depth anything v2/3:
     - crash 4k
@@ -44,6 +44,10 @@ Alternatives:
     - crash 4k
     - 150-400s/it in 1080p. way too slow.
     - works well with new settings, a couple minutes?
+    - can handle any number of frames / length well, but crashes when resolution is too high.
+    - cant handle more than 32 bit integer limit nbr of tensores, i,e 1617 frames × 576 h × 1024 w × 3 rgb = 2,861,236,224 (> 2,147,483,647)
   - the anime scripter: poor quality
   - depth anything v3 streaming: cuda device not ready.
 - normal
+- interpolate
+  - rife: fast, but terrible warping / objects fading in and out when fast moving

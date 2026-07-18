@@ -10,39 +10,81 @@ job:
     nier:
       metadata: {}
       input:
-        link: {{pipelines["nier"].input.link}}
+        link: '{{pipelines["nier"].input.link}}'
+      # steps:
+      #   - type: interpolate
+      #     fps: 240
+      #   - type: branch
+      #     branches:
+      #       footage:
+      #         - type: no_op
+      #       depth:
+      #         - type: depth
+      #           variant:
+      #             type: depth_crafter
+      #             max_res: 1024
+      #   - type: upscale
+      #     variant:
+      #       type: esrgan
+      #     width: 3840
+      #   - type: branch
+      #     branches:
+      #       proxy:
+      #         - type: ffmpeg
+      #           operations:
+      #             - type: encode
+      #               codec: prores
+      #               profile: proxy
+      #       hq:
+      #         - type: ffmpeg
+      #           operations:
+      #             - type: encode
+      #               codec: prores
+      #               profile: '422'
       steps:
-        - type: ffmpeg
-          operations:
-            - type: trim
-              start: 00:00:00
-              end: 00:00:04
-        - type: interpolate
-          fps: 120
-        - type: branch
-          branches:
-            footage:
-              - type: no_op
-            depth:
-              - type: depth
-                variant:
-                  type: depth_crafter
-                  max_res: 1024
+        # - type: ffmpeg
+        #   operations:
+        #     - type: trim
+        #       start: 0:00:00
+        #       end: 0:00:01
         - type: upscale
           variant:
             type: esrgan
           width: 3840
+        - type: interpolate
+          fps: 240
         - type: branch
           branches:
-            proxy:
+            footage:
+              - type: branch
+                branches:
+                  proxy:
+                    - type: ffmpeg
+                      operations:
+                        - type: encode
+                          codec: prores
+                          profile: proxy
+                  hq:
+                    - type: ffmpeg
+                      operations:
+                        - type: encode
+                          codec: prores
+                          profile: "422"
+            depth:
+              - type: depth
+                variant:
+                  type: depth_crafter
+                  max_res: 832
+                  save_exr: true
+              - type: upscale
+                variant:
+                  type: esrgan
+                  output_mode: exr_sequence
+                  exr_type: float
+                  exr_compression: zip
+                width: 3840
               - type: ffmpeg
                 operations:
                   - type: encode
                     codec: prores
-                    profile: proxy
-            hq:
-              - type: ffmpeg
-                operations:
-                  - type: encode
-                    codec: prores
-                    profile: '422'
+                    profile: 4444xq

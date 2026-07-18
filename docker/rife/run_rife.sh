@@ -32,6 +32,37 @@ else
   exit 1
 fi
 
+FPS_RAW="$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of default=noprint_wrappers=1:nokey=1 "$INPUT_VIDEO")"
+if [[ -z "$FPS_RAW" ]]; then
+  echo "Could not read input FPS"
+  exit 1
+fi
+
+TARGET_FPS="$(python3 - <<PY
+fps_raw = "${FPS_RAW}"
+exp = int("${exp}")
+if "/" in fps_raw:
+    num, den = fps_raw.split("/", 1)
+    base_fps = float(num) / float(den)
+else:
+    base_fps = float(fps_raw)
+
+if base_fps <= 0:
+    raise SystemExit(1)
+
+target_fps = int(round(base_fps * (2 ** exp)))
+if target_fps <= 0:
+    raise SystemExit(1)
+
+print(target_fps)
+PY
+)"
+
+if [[ -z "$TARGET_FPS" ]] || [[ ! "$TARGET_FPS" =~ ^[0-9]+$ ]] || [[ "$TARGET_FPS" -le 0 ]]; then
+  echo "Failed to compute target fps from input fps '$FPS_RAW' and scale '$SCALE_FACTOR'"
+  exit 1
+fi
+
 mkdir -p /opt/rife/train_log
 if [[ ! -f /opt/rife/train_log/flownet.pkl ]]; then
   echo "Downloading RIFE HD model..."
@@ -56,7 +87,7 @@ TMP_OUT="$(dirname "$OUTPUT_VIDEO")/.rife_tmp_$(basename "$OUTPUT_VIDEO")"
 TMP_LOG="/tmp/rife_run.log"
 
 cd /opt/rife
-python3 inference_video.py --video="$INPUT_VIDEO" --exp="$exp" --output="$TMP_OUT" 2>&1 | tee "$TMP_LOG"
+python3 inference_video.py --video="$INPUT_VIDEO" --exp="$exp" --fps="$TARGET_FPS" --output="$TMP_OUT" 2>&1 | tee "$TMP_LOG"
 
 mv -f "$TMP_OUT" "$OUTPUT_VIDEO"
 

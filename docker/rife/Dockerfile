@@ -19,10 +19,11 @@ ARG TORCH_CHANNELS="cu128 cu129 cu124 cu121 nightly/cu128 nightly/cu129"
 RUN bash -eu -o pipefail <<'SH'
 channels="${TORCH_CHANNELS}"
 found=0
+selected_channel=""
 
 for channel in $channels; do
     echo "Trying torch wheel channel: $channel"
-    if python3 -m pip install --upgrade --force-reinstall --pre --index-url "https://download.pytorch.org/whl/$channel" torch; then
+    if python3 -m pip install --upgrade --force-reinstall --pre --index-url "https://download.pytorch.org/whl/$channel" torch torchvision; then
         if python3 - <<'PY'
 import torch
 
@@ -38,6 +39,7 @@ raise SystemExit(1)
 PY
         then
             found=1
+            selected_channel="$channel"
             echo "Found sm_120 support using channel: $channel"
             break
         fi
@@ -49,6 +51,15 @@ if [ "$found" -ne 1 ]; then
     echo "Refusing to build an incompatible RIFE image."
     exit 1
 fi
+
+echo "Verifying torchvision import from selected channel: $selected_channel"
+python3 - <<'PY'
+import torch
+import torchvision
+
+print(f"torch={torch.__version__}")
+print(f"torchvision={torchvision.__version__}")
+PY
 SH
 
 WORKDIR /opt

@@ -6,9 +6,11 @@ import shutil
 import subprocess
 import webbrowser
 from time import sleep
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Literal, Sequence, Tuple
 
 from pipe.config import (
+    Branch,
+    BranchStep,
     Colmap,
     Depth,
     DepthCrafterVariant,
@@ -19,6 +21,7 @@ from pipe.config import (
     DepthAnythingV3StreamingVariant,
     DepthAnythingV3Variant,
     Encode,
+    ExportFrames,
     EsrganUpscaleVariant,
     Ffmpeg,
     Interpolate,
@@ -36,6 +39,20 @@ from pydantic import BaseModel
 class ExecutedStep(BaseModel):
     output_path: str
     extension: str
+
+
+class ResolvedStepInput(BaseModel):
+    input_type: Literal["video", "frames"]
+    input_path: str
+    fps: float | None = None
+    frame_extension: str | None = None
+
+    def ffmpeg_input_args(self) -> List[str]:
+        args: List[str] = []
+        if self.input_type == "frames" and self.fps is not None and self.fps > 0:
+            args.extend(["-framerate", f"{self.fps:.6f}"])
+        args.extend(["-i", self.input_path])
+        return args
 
 
 DOCKER_IMAGE_SPECS: Dict[str, Dict[str, Any]] = {
@@ -167,6 +184,44 @@ def build_all_operation_images() -> None:
     build_operation_images_by_keys(sorted(DOCKER_IMAGE_SPECS.keys()))
 
 
+def required_image_keys_for_steps(steps: Sequence[BaseModel]) -> List[str]:
+    keys: List[str] = []
+
+    def _append_key(key: str) -> None:
+        if key not in keys:
+            keys.append(key)
+
+    def _collect_step(step: BaseModel) -> None:
+        if isinstance(step, Interpolate):
+            _append_key("rife")
+            return
+
+        if isinstance(step, Upscale):
+            _append_key(_upscale_variant_image_key(step.variant))
+            return
+
+        if isinstance(step, Depth):
+            _append_key(_depth_variant_image_key(step.variant))
+            return
+
+        if isinstance(step, Normals):
+            _append_key(_normals_variant_image_key(step.variant))
+            return
+
+        if isinstance(step, Branch):
+            for named_branch in step.branches:
+                for branch_step in named_branch.steps:
+                    _collect_branch_step(branch_step)
+
+    def _collect_branch_step(step: BranchStep) -> None:
+        _collect_step(step)
+
+    for step in steps:
+        _collect_step(step)
+
+    return keys
+
+
 def kill_all_operation_containers() -> None:
     images = [get_docker_image(key) for key in sorted(DOCKER_IMAGE_SPECS.keys())]
     _kill_docker_containers_by_images(images)
@@ -295,22 +350,131 @@ def _run_subprocess(command: List[str], error_prefix: str) -> None:
         raise RuntimeError("\n\n".join(details)) from exc
 
 
-def resolve_video_input_path(input_path: str) -> str:
+def _probe_video_fps(video_path: str) -> float | None:
+    probe_command: List[str] = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    try:
+        probe_result = subprocess.run(
+            probe_command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    avg_frame_rate = probe_result.stdout.strip()
+    if not avg_frame_rate or avg_frame_rate == "0/0":
+        return None
+
+    try:
+        numerator, denominator = avg_frame_rate.split("/", 1)
+        den = float(denominator)
+        if den == 0:
+            return None
+        return float(numerator) / den
+    except Exception:
+        return None
+
+
+def resolve_step_output_input(input_path: str) -> ResolvedStepInput:
     input_abs = os.path.abspath(input_path)
     if os.path.splitext(input_abs)[1].lower() != ".json":
-        return input_abs
+        if not os.path.exists(input_abs):
+            raise FileNotFoundError(f"Input path does not exist: {input_abs}")
+        return ResolvedStepInput(input_type="video", input_path=input_abs)
 
     try:
         with open(input_abs, "r") as f:
             metadata = json.load(f)
     except Exception as exc:
         raise RuntimeError(
-            "Expected a video path or a JSON step artifact containing input_video_path, "
+            "Expected a direct media path or a JSON step artifact, "
             f"but could not parse JSON file: {input_abs}"
         ) from exc
 
     if not isinstance(metadata, dict):
         raise RuntimeError(f"JSON step artifact is not an object. File: {input_abs}")
+
+    frame_pattern_raw: str | None = None
+    frame_extension: str | None = None
+    frame_pattern_keys = ["frame_pattern", "exr_frame_pattern"]
+    for key in frame_pattern_keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            frame_pattern_raw = value
+            break
+
+    if frame_pattern_raw is None:
+        frames_dir_value = metadata.get("frames_dir")
+        if not isinstance(frames_dir_value, str) or not frames_dir_value:
+            frames_dir_value = metadata.get("exr_frames_dir")
+
+        frame_extension_value = metadata.get("frame_extension")
+        if not isinstance(frame_extension_value, str) or not frame_extension_value:
+            frame_format_value = metadata.get("frame_format")
+            if isinstance(frame_format_value, str) and frame_format_value:
+                frame_extension_value = f".{frame_format_value}"
+
+        if (
+            isinstance(frames_dir_value, str)
+            and frames_dir_value
+            and isinstance(frame_extension_value, str)
+            and frame_extension_value
+        ):
+            frame_pattern_raw = os.path.join(
+                frames_dir_value, f"%08d{frame_extension_value}"
+            )
+            frame_extension = frame_extension_value
+
+    if frame_pattern_raw is not None:
+        frame_pattern = os.path.abspath(frame_pattern_raw)
+        frames_dir = os.path.dirname(frame_pattern)
+        if not os.path.isdir(frames_dir):
+            raise FileNotFoundError(
+                "Resolved frame sequence directory does not exist. "
+                f"JSON: {input_abs} | frame_pattern: {frame_pattern}"
+            )
+
+        if frame_extension is None:
+            frame_extension = os.path.splitext(frame_pattern)[1]
+            if not frame_extension:
+                frame_extension = None
+
+        if frame_extension is not None:
+            has_frames = any(
+                name.lower().endswith(frame_extension.lower())
+                for name in os.listdir(frames_dir)
+            )
+            if not has_frames:
+                raise FileNotFoundError(
+                    "Resolved frame sequence contains no matching frames. "
+                    f"JSON: {input_abs} | frame_extension: {frame_extension}"
+                )
+
+        fps = None
+        source_video_raw = metadata.get("input_video_path")
+        if isinstance(source_video_raw, str) and source_video_raw:
+            source_video = os.path.abspath(source_video_raw)
+            if os.path.exists(source_video):
+                fps = _probe_video_fps(source_video)
+
+        return ResolvedStepInput(
+            input_type="frames",
+            input_path=frame_pattern,
+            fps=fps,
+            frame_extension=frame_extension,
+        )
 
     candidate_keys = [
         "depth_preview_video_path",
@@ -342,7 +506,40 @@ def resolve_video_input_path(input_path: str) -> str:
             f"JSON: {input_abs} | {chosen_key}: {video_path}"
         )
 
-    return video_path
+    return ResolvedStepInput(input_type="video", input_path=video_path)
+
+
+def resolve_video_input_path(input_path: str) -> str:
+    resolved = resolve_step_output_input(input_path)
+    if resolved.input_type != "video":
+        raise RuntimeError(
+            "Resolved input is a frame sequence, but a video file path is required. "
+            f"Input: {input_path}"
+        )
+    return resolved.input_path
+
+
+def resolve_aspect_reference_video_path(input_path: str) -> str:
+    input_abs = os.path.abspath(input_path)
+    if os.path.splitext(input_abs)[1].lower() != ".json":
+        return resolve_video_input_path(input_abs)
+
+    try:
+        with open(input_abs, "r") as f:
+            metadata = json.load(f)
+    except Exception:
+        return resolve_video_input_path(input_abs)
+
+    if not isinstance(metadata, dict):
+        return resolve_video_input_path(input_abs)
+
+    reference_candidate = metadata.get("input_video_path")
+    if isinstance(reference_candidate, str) and reference_candidate:
+        reference_abs = os.path.abspath(reference_candidate)
+        if os.path.exists(reference_abs):
+            return reference_abs
+
+    return resolve_video_input_path(input_abs)
 
 
 def resolve_video_extension_from_step_output(step_output_path: str) -> str:
@@ -522,11 +719,22 @@ PRORES_PROFILE_TO_FFMPEG = {
     "4444xq": "5",
 }
 
+PRORES_PROFILE_TO_PIX_FMT = {
+    "proxy": "yuv422p10le",
+    "lt": "yuv422p10le",
+    "422": "yuv422p10le",
+    "hq": "yuv422p10le",
+    "4444": "yuv444p10le",
+    "4444xq": "yuv444p10le",
+}
+
 
 def get_ffmpeg_step_extension(step: Ffmpeg, previous_extension: str) -> str:
     for operation in step.operations:
         if isinstance(operation, Encode) and operation.codec == "prores":
             return ".mov"
+        if isinstance(operation, ExportFrames):
+            return ".json"
     return previous_extension
 
 
@@ -537,6 +745,7 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
     trim_operation: Trim | None = None
     copy_tracks_operation: CopyTracks | None = None
     encode_operation: Encode | None = None
+    export_frames_operation: ExportFrames | None = None
 
     for operation in step.operations:
         if isinstance(operation, Trim):
@@ -559,33 +768,54 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
             encode_operation = operation
             continue
 
+        if isinstance(operation, ExportFrames):
+            if export_frames_operation is not None:
+                raise ValueError(
+                    "ffmpeg step supports at most one export_frames operation."
+                )
+            export_frames_operation = operation
+            continue
+
         raise ValueError(f"Unsupported ffmpeg operation: {operation.type}")
 
     if trim_operation is not None and trim_operation.end <= trim_operation.start:
         raise ValueError("ffmpeg trim operation requires end to be after start.")
 
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"Video input not found: {input_path}")
+    if encode_operation is not None and export_frames_operation is not None:
+        raise ValueError(
+            "ffmpeg step cannot use encode and export_frames in the same step."
+        )
+
+    if export_frames_operation is not None and copy_tracks_operation is not None:
+        raise ValueError(
+            "ffmpeg export_frames does not support copy_tracks because frame sequences have no audio/subtitle streams."
+        )
+
+    primary_input = resolve_step_output_input(input_path)
+    if primary_input.input_type == "frames" and encode_operation is None:
+        raise ValueError(
+            "ffmpeg step with frame-sequence input requires an encode operation."
+        )
 
     secondary_input_path: str | None = None
     if copy_tracks_operation is not None:
-        secondary_input_path = copy_tracks_operation.source_path
-        if not os.path.exists(secondary_input_path):
-            raise FileNotFoundError(f"Source input not found: {secondary_input_path}")
+        secondary_input = resolve_step_output_input(copy_tracks_operation.source_path)
+        if secondary_input.input_type != "video":
+            raise ValueError("copy_tracks source must resolve to a video file path.")
+        secondary_input_path = secondary_input.input_path
 
     should_drop_subtitles = encode_operation is not None
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(output_dir, exist_ok=True)
 
-    primary_input_path = os.path.abspath(input_path)
     command: List[str] = ["ffmpeg", "-y"]
 
     if trim_operation is not None:
         command.extend(
             ["-ss", str(trim_operation.start), "-to", str(trim_operation.end)]
         )
-    command.extend(["-i", primary_input_path])
+    command.extend(primary_input.ffmpeg_input_args())
 
     if secondary_input_path is not None:
         if trim_operation is not None:
@@ -594,7 +824,9 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
             )
         command.extend(["-i", os.path.abspath(secondary_input_path)])
 
-    if secondary_input_path is not None:
+    if export_frames_operation is not None:
+        command.extend(["-map", "0:v:0"])
+    elif secondary_input_path is not None:
         command.extend(["-map", "0:v:0", "-map", "1:a?"])
         if not should_drop_subtitles:
             command.extend(["-map", "1:s?"])
@@ -603,14 +835,17 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
         if not should_drop_subtitles:
             command.extend(["-c:s", "copy"])
     else:
-        command.extend(["-map", "0:v", "-map", "0:a?"])
-        if not should_drop_subtitles:
-            command.extend(["-map", "0:s?"])
-        command.extend(["-map_metadata", "0", "-map_chapters", "0"])
-        if encode_operation is not None:
-            command.extend(["-c:a", "copy"])
+        command.extend(["-map", "0:v:0"])
+        if primary_input.input_type == "video":
+            command.extend(["-map", "0:a?"])
             if not should_drop_subtitles:
-                command.extend(["-c:s", "copy"])
+                command.extend(["-map", "0:s?"])
+            command.extend(["-map_metadata", "0", "-map_chapters", "0"])
+        if encode_operation is not None:
+            if primary_input.input_type == "video":
+                command.extend(["-c:a", "copy"])
+                if not should_drop_subtitles:
+                    command.extend(["-c:s", "copy"])
         else:
             command.extend(["-c", "copy"])
 
@@ -624,11 +859,31 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
                 "-profile:v",
                 PRORES_PROFILE_TO_FFMPEG[encode_operation.profile],
                 "-pix_fmt",
-                "yuv422p10le",
+                PRORES_PROFILE_TO_PIX_FMT[encode_operation.profile],
             ]
         )
 
-    command.append(output_path)
+    if export_frames_operation is not None:
+        output_abs = os.path.abspath(output_path)
+        output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+        frames_dir = os.path.join(
+            os.path.dirname(output_abs),
+            f"{output_stem}_{export_frames_operation.format}_frames",
+        )
+        os.makedirs(frames_dir, exist_ok=True)
+
+        frame_pattern = os.path.join(
+            frames_dir, f"frame_%08d.{export_frames_operation.format}"
+        )
+
+        command.extend(["-an", "-sn", "-dn"])
+        if export_frames_operation.format == "exr":
+            command.extend(["-c:v", "exr"])
+        else:
+            command.extend(["-c:v", "png"])
+        command.append(frame_pattern)
+    else:
+        command.append(output_path)
 
     try:
         subprocess.run(command, check=True)
@@ -639,6 +894,37 @@ def run_ffmpeg_step(input_path: str, step: Ffmpeg, output_path: str) -> None:
             f"Command: {shlex.join(command)}",
         ]
         raise RuntimeError("\n\n".join(details)) from exc
+
+    if export_frames_operation is not None:
+        output_abs = os.path.abspath(output_path)
+        output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+        frames_dir = os.path.join(
+            os.path.dirname(output_abs),
+            f"{output_stem}_{export_frames_operation.format}_frames",
+        )
+        extension = f".{export_frames_operation.format}"
+        exported_frames = sorted(
+            name for name in os.listdir(frames_dir) if name.lower().endswith(extension)
+        )
+        if not exported_frames:
+            raise RuntimeError(
+                f"ffmpeg export_frames completed but produced no frames in {frames_dir}"
+            )
+
+        output = {
+            "input_video_path": (
+                primary_input.input_path
+                if primary_input.input_type == "video"
+                else None
+            ),
+            "input_step_artifact_path": os.path.abspath(input_path),
+            "frames_dir": frames_dir,
+            "frame_extension": extension,
+            "frame_pattern": os.path.join(frames_dir, f"frame_%08d{extension}"),
+            "num_frames": len(exported_frames),
+        }
+        with open(output_abs, "w") as f:
+            json.dump(output, f, indent=2, sort_keys=True)
 
 
 def execute_ffmpeg(
@@ -1352,6 +1638,7 @@ def depth_crafter(
     target_fps: int | None,
     max_megapixel_frames: float | None,
     enable_chunk_hack: bool,
+    save_exr: bool,
 ) -> None:
     input_abs = os.path.abspath(input_path)
     if not os.path.exists(input_abs):
@@ -1437,10 +1724,9 @@ def depth_crafter(
     frames_for_estimation: int | None = None
 
     # DepthCrafter can crash with "input tensor must fit into 32-bit index math"
-    # for long high-res clips. Keep max_res unchanged and switch to chunked processing.
+    # for long high-res clips. Run a preflight check and fail fast by default.
     if (
-        enable_chunk_hack
-        and source_width is not None
+        source_width is not None
         and source_height is not None
         and source_nb_frames is not None
         and source_nb_frames > 0
@@ -1462,26 +1748,29 @@ def depth_crafter(
         estimated_elements = frames_for_estimation * 3 * estimated_h * estimated_w
         estimated_megapixels_per_frame = (estimated_h * estimated_w) / 1_000_000.0
 
-        effective_max_megapixel_frames = (
-            max_megapixel_frames
-            if max_megapixel_frames is not None
-            else float(os.environ.get("DEPTH_CRAFTER_MAX_MEGAPIXEL_FRAMES", "120"))
-        )
-        if effective_max_megapixel_frames <= 0:
-            raise ValueError("max_megapixel_frames must be a positive number when set.")
-        vram_chunk_limit = max(
-            1,
-            int(
-                effective_max_megapixel_frames
-                / max(estimated_megapixels_per_frame, 1e-6)
-            ),
-        )
-        if frames_for_estimation > vram_chunk_limit:
-            chunk_frame_limit = vram_chunk_limit
-            print(
-                "DepthCrafter chunked mode enabled for VRAM safety while preserving "
-                f"max_res={max_res}. Processing in chunks of up to {chunk_frame_limit} frames."
+        if enable_chunk_hack:
+            effective_max_megapixel_frames = (
+                max_megapixel_frames
+                if max_megapixel_frames is not None
+                else float(os.environ.get("DEPTH_CRAFTER_MAX_MEGAPIXEL_FRAMES", "120"))
             )
+            if effective_max_megapixel_frames <= 0:
+                raise ValueError(
+                    "max_megapixel_frames must be a positive number when set."
+                )
+            vram_chunk_limit = max(
+                1,
+                int(
+                    effective_max_megapixel_frames
+                    / max(estimated_megapixels_per_frame, 1e-6)
+                ),
+            )
+            if frames_for_estimation > vram_chunk_limit:
+                chunk_frame_limit = vram_chunk_limit
+                print(
+                    "DepthCrafter chunked mode enabled for VRAM safety while preserving "
+                    f"max_res={max_res}. Processing in chunks of up to {chunk_frame_limit} frames."
+                )
 
         if estimated_elements > max_index_elements:
             max_frames_per_chunk = max_index_elements // (3 * estimated_h * estimated_w)
@@ -1489,6 +1778,14 @@ def depth_crafter(
                 raise RuntimeError(
                     "DepthCrafter input exceeds 32-bit index limits even for a single frame at this "
                     f"resolution. Configured max_res={max_res}, estimated shape={estimated_h}x{estimated_w}."
+                )
+
+            if not enable_chunk_hack:
+                raise RuntimeError(
+                    "DepthCrafter preflight failed: predicted tensor size exceeds 32-bit index limits. "
+                    f"estimated_elements={estimated_elements}, max_index_elements={max_index_elements}, "
+                    f"estimated_shape={frames_for_estimation}x{estimated_h}x{estimated_w}x3. "
+                    "Reduce max_res or process_length, or explicitly set enable_chunk_hack=true to allow chunked processing."
                 )
 
             index_chunk_limit = max(1, int(max_frames_per_chunk * 0.9))
@@ -1556,6 +1853,7 @@ def depth_crafter(
             str(max_res),
             str(process_length_for_run),
             str(target_fps),
+            "1" if save_exr else "0",
         ]
 
         print(f"Running DepthCrafter docker command: {shlex.join(command)}")
@@ -1779,6 +2077,7 @@ def depth_crafter(
         "max_res": max_res,
         "process_length": process_length,
         "target_fps": target_fps,
+        "save_exr": save_exr,
         "enable_chunk_hack": enable_chunk_hack,
         "chunked_processing": used_chunking,
         "chunk_frame_limit": chunk_frame_limit,
@@ -2664,22 +2963,57 @@ def execute_interpolate(
     )
 
 
-def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
+def upscale_esrgan(
+    input_path: str,
+    output_path: str,
+    width: int,
+    output_mode: str,
+    video_codec: str,
+    prores_profile: str,
+    x264_crf: int,
+    x264_preset: str,
+    exr_type: str,
+    exr_compression: str,
+) -> None:
     if width <= 0:
         raise ValueError(
             f"Invalid upscale width={width}. Width must be a positive integer."
         )
 
     input_abs = resolve_video_input_path(input_path)
+    aspect_reference_input_abs = resolve_aspect_reference_video_path(input_path)
     output_abs = os.path.abspath(output_path)
     input_dir = os.path.dirname(input_abs)
     output_dir = os.path.dirname(output_abs)
     os.makedirs(output_dir, exist_ok=True)
 
+    if output_mode == "video":
+        docker_output_target = f"/io/out/{os.path.basename(output_abs)}"
+        output_exists_check_path = output_abs
+        sequence_frames_dir_abs: str | None = None
+    else:
+        output_stem = os.path.splitext(os.path.basename(output_abs))[0]
+        sequence_frames_dir_abs = os.path.join(
+            output_dir, f"{output_stem}_esrgan_frames"
+        )
+        os.makedirs(sequence_frames_dir_abs, exist_ok=True)
+        docker_output_target = f"/io/out/{os.path.basename(sequence_frames_dir_abs)}"
+        output_exists_check_path = sequence_frames_dir_abs
+
     input_width = get_video_width(input_abs)
     if width <= input_width:
         raise ValueError(
             f"Requested width={width} is not larger than input width={input_width}."
+        )
+
+    reference_width, reference_height = _get_video_dimensions(aspect_reference_input_abs)
+    target_height = int(
+        round((reference_height * width) / max(reference_width, 1))
+    )
+    if target_height <= 0:
+        raise RuntimeError(
+            "Computed invalid ESRGAN target height from aspect reference. "
+            f"reference={aspect_reference_input_abs}, width={reference_width}, height={reference_height}, target_width={width}"
         )
 
     esrgan_image = get_docker_image("esrgan")
@@ -2694,6 +3028,24 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
         "run",
         "--rm",
         *docker_gpu_args,
+        "-e",
+        f"ESRGAN_OUTPUT_MODE={output_mode}",
+        "-e",
+        f"ESRGAN_VIDEO_CODEC={video_codec}",
+        "-e",
+        f"ESRGAN_PRORES_PROFILE={prores_profile}",
+        "-e",
+        f"ESRGAN_X264_CRF={x264_crf}",
+        "-e",
+        f"ESRGAN_X264_PRESET={x264_preset}",
+        "-e",
+        f"ESRGAN_EXR_TYPE={exr_type}",
+        "-e",
+        f"ESRGAN_EXR_COMPRESSION={exr_compression}",
+        "-e",
+        f"ESRGAN_TARGET_HEIGHT={target_height}",
+        "-e",
+        "OPENCV_IO_ENABLE_OPENEXR=1",
         "-v",
         f"{input_dir}:/io/in:ro",
         "-v",
@@ -2703,7 +3055,7 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
         esrgan_image,
         f"/io/in/{os.path.basename(input_abs)}",
         str(width),
-        f"/io/out/{os.path.basename(output_abs)}",
+        docker_output_target,
     ]
     try:
         subprocess.run(command, check=True)
@@ -2716,6 +3068,62 @@ def upscale_esrgan(input_path: str, output_path: str, width: int) -> None:
             f"Requested width: {width}",
         ]
         raise RuntimeError("\n\n".join(details)) from exc
+
+    if output_mode == "video":
+        if not os.path.exists(output_exists_check_path):
+            raise RuntimeError(
+                "ESRGAN completed but output video was not produced at "
+                f"{output_exists_check_path}"
+            )
+        return
+
+    if sequence_frames_dir_abs is None:
+        raise RuntimeError("ESRGAN sequence mode internal state is invalid.")
+
+    exr_frames = sorted(
+        name
+        for name in os.listdir(sequence_frames_dir_abs)
+        if name.lower().endswith(".exr")
+    )
+    png_frames = sorted(
+        name
+        for name in os.listdir(sequence_frames_dir_abs)
+        if name.lower().endswith(".png")
+    )
+
+    if exr_frames:
+        frame_extension = ".exr"
+        frame_count = len(exr_frames)
+    elif png_frames:
+        frame_extension = ".png"
+        frame_count = len(png_frames)
+    else:
+        raise RuntimeError(
+            "ESRGAN sequence mode completed but produced no .exr or .png frames in "
+            f"{sequence_frames_dir_abs}"
+        )
+
+    output = {
+        "input_video_path": input_abs,
+        "output_mode": output_mode,
+        "frame_format": frame_extension.lstrip("."),
+        "frames_dir": sequence_frames_dir_abs,
+        "frame_pattern": os.path.join(
+            sequence_frames_dir_abs, f"%08d{frame_extension}"
+        ),
+        "num_frames": frame_count,
+        "exr_frames_dir": (
+            sequence_frames_dir_abs if frame_extension == ".exr" else None
+        ),
+        "exr_frame_pattern": (
+            os.path.join(sequence_frames_dir_abs, "%08d.exr")
+            if frame_extension == ".exr"
+            else None
+        ),
+        "num_exr_frames": frame_count if frame_extension == ".exr" else 0,
+    }
+    with open(output_abs, "w") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
 
 
 def _get_video_dimensions(input_path: str) -> tuple[int, int]:

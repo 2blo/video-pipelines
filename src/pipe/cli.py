@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List
+from typing import List, cast
 
 import typer
 import yaml
@@ -8,6 +8,7 @@ from pipe.ops import (
     build_operation_images_by_keys,
     kill_all_operation_containers,
     list_buildable_docker_targets,
+    required_image_keys_for_steps,
 )
 from pipe.pipeline import (
     filter_config_pipelines,
@@ -174,7 +175,65 @@ def _parse_numbered_selection(selection: str, n_items: int) -> List[int]:
 
 
 @app.command()
-def build() -> None:
+def build(
+    chart: str | None = typer.Option(
+        None,
+        "--chart",
+        help="Path to a chart file. If omitted, you will be prompted to select one.",
+    ),
+) -> None:
+    mode = (
+        typer.prompt(
+            "Build by [P]ipeline, [I]mage list, or [A]ll images?",
+            default="p",
+        )
+        .strip()
+        .lower()
+    )
+
+    if mode in ["", "p", "pipeline", "pipelines"]:
+        settings = load_or_create_settings()
+        if chart is None:
+            chart_path = choose_chart(settings.charts_directory)
+        else:
+            chart_path = Path(chart)
+            if not chart_path.exists() or not chart_path.is_file():
+                raise ValueError(f"Chart file does not exist: {chart}")
+
+        loaded_config = load_config_from_chart_path(str(chart_path))
+        pipeline_names = list(loaded_config.config.job.pipelines.keys())
+        selected_pipeline_names = choose_pipelines(pipeline_names)
+
+        required_keys: List[str] = []
+        for pipeline_name in selected_pipeline_names:
+            pipeline = loaded_config.config.job.pipelines[pipeline_name]
+            pipeline_steps = cast(List[BaseModel], pipeline.steps)
+            for key in required_image_keys_for_steps(pipeline_steps):
+                if key not in required_keys:
+                    required_keys.append(key)
+
+        if not required_keys:
+            typer.echo("Selected pipeline(s) do not require docker image builds.")
+            return
+
+        targets_by_key = {key: (image, dockerfile) for key, image, dockerfile in list_buildable_docker_targets()}
+        typer.echo("Building required images for selected pipeline(s):")
+        for key in required_keys:
+            image, dockerfile = targets_by_key[key]
+            typer.echo(f"- {key}: {image} ({dockerfile})")
+
+        build_operation_images_by_keys(required_keys)
+        typer.echo("Built required operation docker images for selected pipeline(s).")
+        return
+
+    if mode in ["a", "all", "*"]:
+        build_all_operation_images()
+        typer.echo("Built all operation docker images.")
+        return
+
+    if mode not in ["i", "image", "images"]:
+        raise ValueError(f"Unknown build mode: {mode}")
+
     targets = list_buildable_docker_targets()
     if not targets:
         typer.echo("No buildable docker targets found.")

@@ -33,6 +33,11 @@ class Encode(BaseModel):
     profile: Literal["proxy", "lt", "422", "hq", "4444", "4444xq"] = "422"
 
 
+class ExportFrames(BaseModel):
+    type: Literal["export_frames"]
+    format: Literal["exr", "png"] = "exr"
+
+
 class Interpolate(BaseModel):
     type: Literal["interpolate"]
     fps: int
@@ -46,6 +51,15 @@ class Upscale(BaseModel):
 
 class EsrganUpscaleVariant(BaseModel):
     type: Literal["esrgan"]
+    output_mode: Literal["video", "exr_sequence"] = "video"
+    video_codec: Literal["h264", "prores"] = "h264"
+    prores_profile: Literal["proxy", "lt", "422", "hq", "4444", "4444xq"] = "hq"
+    x264_crf: int = 17
+    x264_preset: str = "medium"
+    exr_type: Literal["half", "float"] = "float"
+    exr_compression: Literal[
+        "none", "rle", "zips", "zip", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"
+    ] = "zip"
 
 
 class SeedVR2UpscaleVariant(BaseModel):
@@ -128,6 +142,7 @@ class DepthCrafterVariant(BaseModel):
     target_fps: int | None = None
     max_megapixel_frames: float | None = None
     enable_chunk_hack: bool = False
+    save_exr: bool = False
 
 
 class DepthProVariant(BaseModel):
@@ -193,7 +208,10 @@ class CopyTracks(BaseModel):
     source_path: str
 
 
-FfmpegOperation = Annotated[Trim | CopyTracks | Encode, Field(discriminator="type")]
+FfmpegOperation = Annotated[
+    Trim | CopyTracks | Encode | ExportFrames,
+    Field(discriminator="type"),
+]
 
 
 class Ffmpeg(BaseModel):
@@ -202,7 +220,7 @@ class Ffmpeg(BaseModel):
 
 
 BranchStep = Annotated[
-    Ffmpeg | Interpolate | Upscale | Colmap | Depth | Normals | NoOp,
+    "Ffmpeg | Interpolate | Upscale | Colmap | Depth | Normals | NoOp | Branch",
     Field(discriminator="type"),
 ]
 
@@ -292,3 +310,6 @@ class Config(BaseModel):
     artifact_dir: str
     output_dir: str
     job: Job
+
+
+Branch.model_rebuild()

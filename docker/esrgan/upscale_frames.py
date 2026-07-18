@@ -42,7 +42,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--batch-size", type=int, default=0)
+    parser.add_argument("--target-width", type=int, default=0)
+    parser.add_argument("--target-height", type=int, default=0)
+    parser.add_argument("--output-format", choices=["png", "exr"], default="png")
+    parser.add_argument("--exr-type", choices=["half", "float"], default="float")
+    parser.add_argument(
+        "--exr-compression",
+        choices=[
+            "none",
+            "rle",
+            "zips",
+            "zip",
+            "piz",
+            "pxr24",
+            "b44",
+            "b44a",
+            "dwaa",
+            "dwab",
+        ],
+        default="zip",
+    )
     return parser.parse_args()
+
+
+def _resolve_exr_imwrite_params(exr_type: str, compression: str) -> List[int]:
+    compression_attr = {
+        "none": "IMWRITE_EXR_COMPRESSION_NO",
+        "rle": "IMWRITE_EXR_COMPRESSION_RLE",
+        "zips": "IMWRITE_EXR_COMPRESSION_ZIPS",
+        "zip": "IMWRITE_EXR_COMPRESSION_ZIP",
+        "piz": "IMWRITE_EXR_COMPRESSION_PIZ",
+        "pxr24": "IMWRITE_EXR_COMPRESSION_PXR24",
+        "b44": "IMWRITE_EXR_COMPRESSION_B44",
+        "b44a": "IMWRITE_EXR_COMPRESSION_B44A",
+        "dwaa": "IMWRITE_EXR_COMPRESSION_DWAA",
+        "dwab": "IMWRITE_EXR_COMPRESSION_DWAB",
+    }
+    type_attr = {
+        "half": "IMWRITE_EXR_TYPE_HALF",
+        "float": "IMWRITE_EXR_TYPE_FLOAT",
+    }
+
+    required_attrs = [
+        "IMWRITE_EXR_COMPRESSION",
+        compression_attr[compression],
+        "IMWRITE_EXR_TYPE",
+        type_attr[exr_type],
+    ]
+    missing = [attr for attr in required_attrs if not hasattr(cv2, attr)]
+    if missing:
+        raise RuntimeError(
+            "OpenCV EXR writing support is missing required constants: "
+            + ", ".join(missing)
+        )
+
+    return [
+        int(getattr(cv2, "IMWRITE_EXR_COMPRESSION")),
+        int(getattr(cv2, compression_attr[compression])),
+        int(getattr(cv2, "IMWRITE_EXR_TYPE")),
+        int(getattr(cv2, type_attr[exr_type])),
+    ]
 
 
 def load_model(model_path: str, device: torch.device, use_half: bool) -> RRDBNet:
@@ -79,10 +138,27 @@ def load_model(model_path: str, device: torch.device, use_half: bool) -> RRDBNet
 
 
 def load_frame_tensor(frame_path: str) -> np.ndarray:
-    image = cv2.imread(frame_path, cv2.IMREAD_COLOR)
+    image = cv2.imread(frame_path, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise RuntimeError(f"Could not read frame: {frame_path}")
-    image = image.astype(np.float32) / 255.0
+
+    if image.ndim == 2:
+        image = np.repeat(image[:, :, None], 3, axis=2)
+    elif image.ndim == 3 and image.shape[2] == 4:
+        image = image[:, :, :3]
+
+    if image.dtype == np.uint8:
+        image = image.astype(np.float32) / 255.0
+    elif image.dtype == np.uint16:
+        image = image.astype(np.float32) / 65535.0
+    elif np.issubdtype(image.dtype, np.floating):
+        image = image.astype(np.float32)
+        image = np.clip(image, 0.0, 1.0)
+    else:
+        raise RuntimeError(
+            f"Unsupported frame dtype for ESRGAN input: {image.dtype} at {frame_path}"
+        )
+
     return np.transpose(image[:, :, [2, 1, 0]], (2, 0, 1))
 
 
@@ -106,6 +182,15 @@ def infer_batch_size(frame_path: str, requested_batch_size: int, use_half: bool)
 def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.target_width < 0 or args.target_height < 0:
+        raise RuntimeError("target-width and target-height must be non-negative.")
+    apply_resize = args.target_width > 0 and args.target_height > 0
+
+    effective_output_format = args.output_format
+    if args.output_format == "exr" and not cv2.haveImageWriter(".exr"):
+        effective_output_format = "png"
+        print("OpenCV EXR writer unavailable; falling back to PNG output.")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for ESRGAN inference.")
@@ -131,6 +216,9 @@ def main() -> None:
     if not frame_paths:
         raise RuntimeError(f"No frames found in: {args.input_dir}")
     batch_size = infer_batch_size(frame_paths[0], args.batch_size, use_half)
+    exr_params: List[int] | None = None
+    if effective_output_format == "exr":
+        exr_params = _resolve_exr_imwrite_params(args.exr_type, args.exr_compression)
 
     model = load_model(args.model_path, device, use_half=use_half)
 
@@ -153,10 +241,27 @@ def main() -> None:
         for index, frame_path in enumerate(batch_paths):
             output = output_batch[index]
             output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))
-            output = (output * 255.0).round().astype(np.uint8)
 
-            out_path = os.path.join(args.output_dir, os.path.basename(frame_path))
-            ok = cv2.imwrite(out_path, output)
+            if apply_resize and (
+                output.shape[1] != args.target_width
+                or output.shape[0] != args.target_height
+            ):
+                output = cv2.resize(
+                    output,
+                    (args.target_width, args.target_height),
+                    interpolation=cv2.INTER_LANCZOS4,
+                )
+
+            if effective_output_format == "png":
+                output_u8 = (output * 255.0).round().astype(np.uint8)
+                out_path = os.path.join(args.output_dir, os.path.basename(frame_path))
+                ok = cv2.imwrite(out_path, output_u8)
+            else:
+                stem, _ = os.path.splitext(os.path.basename(frame_path))
+                out_path = os.path.join(args.output_dir, f"{stem}.exr")
+                if exr_params is None:
+                    raise RuntimeError("EXR writer params are not initialized.")
+                ok = cv2.imwrite(out_path, output.astype(np.float32), exr_params)
             if not ok:
                 raise RuntimeError(f"Could not write upscaled frame: {out_path}")
 
