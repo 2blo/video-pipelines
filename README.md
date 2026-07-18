@@ -1,20 +1,53 @@
 # Video pipelines
 
-## RIFE Docker video interpolation
+Recommended pipeline for real life footage:
 
-Build + run with your own input/output paths (WSL paths, for example `/mnt/c/...`, work):
+- script:
+  - upscale - cheaper than after interpolation, but may interfere with 3d camera reconstruction, if so do after, but before depth
+  - interpolate to 240fps - may interfere with 3d camera reconstruction, if so do after, but before depth
+  - extract 3d camera (effects compatible)
+  - get depth, doesnt matter if its before or after 3d camera.
+- blender:
+  - make and animate 3d characters and environments, export as models
+- after effects:
+  - import 3d models, anchor using 3d camera
+  - composite character and footage, block out character with depth map
+  - velocity
+  - import 3d camera.
+  - apply effects on 3d character / matte layer / 3d camera movement
 
-```bash
-make rife-upscale INPUT=/path/to/input.mp4 SCALE=2 OUTPUT=/path/to/output.mp4
-```
+Unused:
 
-- `SCALE` is temporal interpolation scale: `2` = 2x fps, `4` = 4x fps, etc. (power of two).
-- GPU is enabled by default with `--gpus all`.
+- restore / sharpen - maybe redundant with upscaling,
+- stabilize - optional if using gimball
 
-Run with an auto-generated example video:
+Alternatives:
 
-```bash
-make rife-example
-```
+- import 3d camera to blender and composite with character
+  - cons:
+    - character velocity needs to match footage, else movement will drift
+    - slower to iterate (e.g., modify character position)
+  - pros:
+    - may have more control over lightning etc
+    - may be more performant vs working on a exported video layer.
+- 3d camera track can be swapper with after effects built in tracker.
 
-Outputs are written to `sandbox/outputs/example_2x.mp4`.
+## Current findings
+
+- upscale to 4k
+  - seedvr2 unstable, worked some time but crash usually
+  - esrgan stable if other resource usage is limited (close after effects), a bit slow.
+- depth
+  - depth anything v2/3:
+    - crash 4k
+  - depth crafter:
+    - crash 4k
+    - 150-400s/it in 1080p. way too slow.
+    - works well with new settings, a couple minutes?
+    - can handle any number of frames / length well, but crashes when resolution is too high.
+    - cant handle more than 32 bit integer limit nbr of tensores, i,e 1617 frames × 576 h × 1024 w × 3 rgb = 2,861,236,224 (> 2,147,483,647)
+  - the anime scripter: poor quality
+  - depth anything v3 streaming: cuda device not ready.
+- normal
+- interpolate
+  - rife: fast, but terrible warping / objects fading in and out when fast moving

@@ -6,10 +6,36 @@ shows: {}
 job:
   name: example_job
   pipelines:
-    4k_240fps:
+    current_best_template:
       metadata: {}
       input:
-        link: {{pipelines["4k_240fps"].input.link}}
+        link: {{pipelines["current_best_template"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:00
+              end: 00:00:04
+        - type: interpolate
+          fps: 120
+        - type: branch
+          branches:
+            - type: no_op
+            - type: depth
+              variant:
+                type: depth_crafter
+                max_res: 1080
+                max_megapixel_frames: 30
+        - type: upscale
+          variant:
+            type: esrgan
+          width: 3840
+
+
+    4k_seedvr2:
+      metadata: {}
+      input:
+        link: {{pipelines["4k_seedvr2"].input.link}}
       steps:
         - type: ffmpeg
           operations:
@@ -17,6 +43,74 @@ job:
               start: 00:00:02
               end: 00:00:04
         - type: upscale
-          width: 2160
-        - type: interpolate
-          fps: 240
+          width: 3840
+          variant:
+            type: seedvr2
+            model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
+            batch_size: 5
+            temporal_overlap: 3
+            max_resolution: 2160
+            blocks_to_swap: 16
+            swap_io_components: true
+            dit_offload_device: cpu
+            vae_offload_device: cpu
+            tensor_offload_device: cpu
+            vae_encode_tiled: true
+            vae_decode_tiled: true
+            vae_encode_tile_size: 1024
+            vae_encode_tile_overlap: 128
+            vae_decode_tile_size: 1024
+            vae_decode_tile_overlap: 128
+            cache_dit: true
+            cache_vae: true
+
+    4k_seedv3_full:
+      metadata: {}
+      input:
+        link: {{pipelines["4k_seedv3_full"].input.link}}
+      steps:
+        - type: upscale
+          width: 3840
+          variant:
+            # "seedv3" requested; current integrated backend is SeedVR2.
+            type: seedvr2
+            model: seedvr2_ema_3b_fp8_e4m3fn.safetensors
+            batch_size: 5
+            temporal_overlap: 3
+            max_resolution: 2160
+            blocks_to_swap: 16
+            swap_io_components: true
+            dit_offload_device: cpu
+            vae_offload_device: cpu
+            tensor_offload_device: cpu
+            vae_encode_tiled: true
+            vae_decode_tiled: true
+            vae_encode_tile_size: 1024
+            vae_encode_tile_overlap: 128
+            vae_decode_tile_size: 1024
+            vae_decode_tile_overlap: 128
+            cache_dit: true
+            cache_vae: true
+
+    colmap_camera_path:
+      metadata: {}
+      input:
+        link: {{pipelines["colmap_camera_path"].input.link}}
+      steps:
+        - type: ffmpeg
+          operations:
+            - type: trim
+              start: 00:00:02
+              end: 00:00:08
+        - type: colmap
+          frame_rate: 8
+          max_frames: 120
+          image_format: jpg
+          camera_mode: single
+          sequential_overlap: 15
+          loop_detection: true
+          min_num_matches: 20
+          max_num_models: 1
+          min_model_size: 10
+          random_seed: 0
+          use_gpu: true
